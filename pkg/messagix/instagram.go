@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 
 	"github.com/google/go-querystring/query"
 	"github.com/google/uuid"
@@ -28,6 +29,16 @@ import (
 // specific methods for insta api, not socket related
 type InstagramMethods struct {
 	client *Client
+}
+
+func logResponseBody(event *zerolog.Event, body []byte) *zerolog.Event {
+	if len(body) == 0 {
+		return event
+	}
+	if json.Valid(body) {
+		return event.RawJSON("response", body)
+	}
+	return event.Bytes("response", body)
 }
 
 func (ig *InstagramMethods) FetchProfile(ctx context.Context, username string) (*responses.ProfileInfoResponse, error) {
@@ -107,6 +118,188 @@ func (ig *InstagramMethods) FetchReel(ctx context.Context, reelIDs []string, med
 	}
 
 	return reelInfo, nil
+}
+
+func (ig *InstagramMethods) FetchReelsTray(ctx context.Context) (*responses.ReelsTrayResponse, error) {
+	h := ig.client.buildHeaders(true, false)
+	h.Set("x-requested-with", "XMLHttpRequest")
+	h.Set("referer", ig.client.GetEndpoint("base_url"))
+	h.Set("Accept", "*/*")
+	reqUrl := ig.client.GetEndpoint("reels_tray")
+
+	resp, respBody, err := ig.client.MakeRequest(ctx, reqUrl, "GET", h, nil, types.NONE)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch reels tray: %w", err)
+	}
+
+	ig.client.cookies.UpdateFromResponse(resp)
+
+	var tray *responses.ReelsTrayResponse
+	err = json.Unmarshal(respBody, &tray)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode reels tray response (statusCode=%d): %w", resp.StatusCode, err)
+	}
+	return tray, nil
+}
+
+func (ig *InstagramMethods) SendStoryReply(ctx context.Context, threadID, mediaID, reelID, text string) (string, error) {
+	if mediaID == "" || reelID == "" {
+		return "", fmt.Errorf("missing story metadata for reply")
+	}
+	if !strings.Contains(mediaID, "_") {
+		mediaID = fmt.Sprintf("%s_%s", mediaID, reelID)
+	}
+	form := url.Values{}
+	clientContext := uuid.NewString()
+	form.Set("action", "send_item")
+	form.Set("client_context", clientContext)
+	form.Set("mutation_token", clientContext)
+	form.Set("media_id", mediaID)
+	form.Set("reel_id", reelID)
+	if text != "" {
+		form.Set("text", text)
+	}
+	if ig.client.configs != nil && ig.client.configs.Jazoest != "" {
+		form.Set("jazoest", ig.client.configs.Jazoest)
+	}
+	var resolvedThreadID string
+	var err error
+	if threadID == "" {
+		ig.client.Logger.Info().
+			Strs("recipients", []string{reelID}).
+			Msg("Creating thread for story reply")
+		resolvedThreadID, err = ig.CreateOrGetThread(ctx, []string{reelID})
+		if err != nil {
+			return "", fmt.Errorf("failed to ensure thread for story reply: %w", err)
+		}
+		ig.client.Logger.Info().Str("thread_id", resolvedThreadID).Msg("Got thread for story reply")
+	} else {
+		resolvedThreadID = threadID
+	}
+	form.Set("thread_id", resolvedThreadID)
+	payload := []byte(form.Encode())
+
+	headers := ig.client.buildHeaders(true, false)
+	headers.Set("content-type", "application/x-www-form-urlencoded")
+	headers.Set("x-requested-with", "XMLHttpRequest")
+	headers.Set("origin", ig.client.GetEndpoint("base_url"))
+	headers.Set("referer", ig.client.GetEndpoint("messages"))
+	headers.Set("sec-fetch-dest", "empty")
+	headers.Set("sec-fetch-mode", "cors")
+	headers.Set("sec-fetch-site", "same-origin")
+
+	url := ig.client.GetEndpoint("direct_reel_share")
+	resp, body, err := ig.client.MakeRequest(ctx, url, "POST", headers, payload, types.FORM)
+	if err != nil {
+		evt := ig.client.Logger.Error().
+			Err(err).
+			Str("thread_id", resolvedThreadID).
+			Str("media_id", mediaID).
+			Str("reel_id", reelID)
+		if resp != nil {
+			evt = evt.Int("status_code", resp.StatusCode)
+		}
+		logResponseBody(evt, body).Msg("Instagram story reply request errored")
+		return "", fmt.Errorf("failed to send story reply: %w", err)
+	}
+	if resp == nil {
+		return "", fmt.Errorf("story reply request returned no response")
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		evt := ig.client.Logger.Error().
+			Int("status_code", resp.StatusCode).
+			Str("thread_id", resolvedThreadID).
+			Str("media_id", mediaID).
+			Str("reel_id", reelID)
+		logResponseBody(evt, body).Msg("Instagram story reply request failed")
+		return "", fmt.Errorf("story reply request returned status %d", resp.StatusCode)
+	}
+	var result struct {
+		Status  string `json:"status"`
+		Payload struct {
+			ItemID   string `json:"item_id"`
+			ThreadID string `json:"thread_id"`
+		} `json:"payload"`
+	}
+	if err = json.Unmarshal(body, &result); err != nil {
+		ig.client.Logger.Error().Err(err).RawJSON("body", body).Msg("Failed to decode story reply response")
+		return "", fmt.Errorf("failed to decode story reply response: %w", err)
+	}
+	if strings.ToLower(result.Status) != "ok" {
+		return "", fmt.Errorf("story reply rejected: %s", string(body))
+	}
+	if result.Payload.ItemID == "" {
+		return "", fmt.Errorf("story reply missing item id: %s", string(body))
+	}
+	return result.Payload.ItemID, nil
+}
+
+func (ig *InstagramMethods) CreateOrGetThread(ctx context.Context, userIDs []string) (string, error) {
+	if len(userIDs) == 0 {
+		return "", fmt.Errorf("no recipients for thread")
+	}
+	form := url.Values{}
+	recipients, err := json.Marshal(userIDs)
+	if err != nil {
+		return "", err
+	}
+	form.Set("recipient_users", string(recipients))
+	form.Set("thread_type", "private")
+	if ig.client.configs != nil && ig.client.configs.Jazoest != "" {
+		form.Set("jazoest", ig.client.configs.Jazoest)
+	}
+	payload := []byte(form.Encode())
+	headers := ig.client.buildHeaders(true, false)
+	headers.Set("content-type", "application/x-www-form-urlencoded")
+	headers.Set("x-requested-with", "XMLHttpRequest")
+	headers.Set("origin", ig.client.GetEndpoint("base_url"))
+	headers.Set("referer", ig.client.GetEndpoint("messages"))
+	headers.Set("sec-fetch-dest", "empty")
+	headers.Set("sec-fetch-mode", "cors")
+	headers.Set("sec-fetch-site", "same-origin")
+	url := ig.client.GetEndpoint("direct_create_thread")
+	resp, body, err := ig.client.MakeRequest(ctx, url, "POST", headers, payload, types.FORM)
+	if err != nil {
+		evt := ig.client.Logger.Error().
+			Err(err).
+			Strs("recipient_users", userIDs)
+		if resp != nil {
+			evt = evt.Int("status_code", resp.StatusCode)
+		}
+		logResponseBody(evt, body).Msg("Instagram create thread request errored")
+		return "", fmt.Errorf("failed to create thread: %w", err)
+	}
+	if resp == nil {
+		return "", fmt.Errorf("create thread returned no response")
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		evt := ig.client.Logger.Error().
+			Int("status_code", resp.StatusCode).
+			Strs("recipient_users", userIDs)
+		logResponseBody(evt, body).Msg("Instagram create thread request failed")
+		return "", fmt.Errorf("create thread returned status %d", resp.StatusCode)
+	}
+	var result struct {
+		Status string `json:"status"`
+		Thread struct {
+			ThreadID string `json:"thread_id"`
+		} `json:"thread"`
+		ThreadID string `json:"thread_id"`
+	}
+	if err = json.Unmarshal(body, &result); err != nil {
+		return "", fmt.Errorf("failed to decode create thread response: %w", err)
+	}
+	if strings.ToLower(result.Status) != "ok" {
+		return "", fmt.Errorf("create thread rejected: %s", string(body))
+	}
+	threadID := result.ThreadID
+	if threadID == "" {
+		threadID = result.Thread.ThreadID
+	}
+	if threadID == "" {
+		return "", fmt.Errorf("create thread missing thread id: %s", string(body))
+	}
+	return threadID, nil
 }
 
 // # NOTE:

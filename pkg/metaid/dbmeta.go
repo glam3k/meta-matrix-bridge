@@ -19,6 +19,18 @@ import (
 type MessageMetadata struct {
 	EditTimestamp   int64           `json:"edit_timestamp,omitempty"`
 	DirectMediaMeta json.RawMessage `json:"direct_media_meta,omitempty"`
+	Story           *StoryMetadata  `json:"story,omitempty"`
+}
+
+type StoryMetadata struct {
+	Platform           string   `json:"platform,omitempty"`
+	StoryID            string   `json:"story_id,omitempty"`
+	ReelID             string   `json:"reel_id,omitempty"`
+	AuthorID           string   `json:"author_id,omitempty"`
+	PostedAt           int64    `json:"posted_at,omitempty"`
+	ExpiresAt          int64    `json:"expires_at,omitempty"`
+	CanReply           *bool    `json:"can_reply,omitempty"`
+	DisabledReplyTypes []string `json:"disabled_reply_types,omitempty"`
 }
 
 type GhostMetadata struct {

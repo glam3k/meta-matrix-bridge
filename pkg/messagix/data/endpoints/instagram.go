@@ -25,8 +25,11 @@ var InstagramEndpoints = map[string]string{
 	"i_graphql":        "https://i.instagram.com/graphql_www",
 	"route_definition": instaBaseUrl + "/ajax/route-definition/",
 
-	"web_profile_info": instaApiV1Url + "/users/web_profile_info/?",
-	"reels_media":      instaApiV1Url + "/feed/reels_media/?",
-	"media_info":       instaApiV1Url + "/media/%s/info/",
-	"web_push":         instaWebApiV1Url + "/push/register/",
+	"web_profile_info":     instaApiV1Url + "/users/web_profile_info/?",
+	"reels_media":          instaApiV1Url + "/feed/reels_media/?",
+	"reels_tray":           instaApiV1Url + "/feed/reels_tray/",
+	"media_info":           instaApiV1Url + "/media/%s/info/",
+	"web_push":             instaWebApiV1Url + "/push/register/",
+	"direct_reel_share":    instaApiV1Url + "/direct_v2/threads/broadcast/reel_share/",
+	"direct_create_thread": instaApiV1Url + "/direct_v2/create_group_thread/",
 }

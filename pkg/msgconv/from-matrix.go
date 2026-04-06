@@ -92,15 +92,9 @@ func (mc *MessageConverter) ToMeta(
 		}
 	}
 	if replyTo != nil {
-		msgID, ok := metaid.ParseMessageID(replyTo.ID).(metaid.ParsedFBMessageID)
-		if ok {
-			task.ReplyMetaData = &socket.ReplyMetaData{
-				ReplyMessageId:  msgID.ID,
-				ReplySourceType: 1,
-				ReplyType:       0,
-				ReplySender:     metaid.ParseUserID(replyTo.SenderID),
-			}
-		} // TODO log warning in else case?
+		if err := mc.applyReplyMetadata(task, replyTo, client); err != nil {
+			return nil, err
+		}
 	}
 	if content.MsgType == event.MsgEmote && !relaybotFormatted {
 		content.Body = "/me " + content.Body
@@ -282,6 +276,19 @@ func (mc *MessageConverter) reuploadFileToMeta(ctx context.Context, client *mess
 		return 0, fmt.Errorf("%w: fbid not received", bridgev2.ErrMediaReuploadFailed)
 	}
 	return attachmentID, nil
+}
+
+func (mc *MessageConverter) applyReplyMetadata(task *socket.SendMessageTask, replyTo *database.Message, client *messagix.Client) error {
+	msgID, ok := metaid.ParseMessageID(replyTo.ID).(metaid.ParsedFBMessageID)
+	if ok {
+		task.ReplyMetaData = &socket.ReplyMetaData{
+			ReplyMessageId:  msgID.ID,
+			ReplySourceType: 1,
+			ReplyType:       0,
+			ReplySender:     metaid.ParseUserID(replyTo.SenderID),
+		}
+	}
+	return nil
 }
 
 // There is a subset of Instagram accounts that are for some reason unable to upload

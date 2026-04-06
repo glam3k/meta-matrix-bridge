@@ -179,11 +179,15 @@ func (c *Client) MakeRequest(ctx context.Context, url string, method string, hea
 		return nil, nil, ErrClientIsNil
 	}
 	var attempts int
+	var lastResp *http.Response
+	var lastBody []byte
 	for {
 		attempts++
 		start := time.Now()
 		resp, respDat, err := c.makeRequestDirect(ctx, url, method, headers, payload, contentType)
 		dur := time.Since(start)
+		lastResp = resp
+		lastBody = respDat
 		if err == nil {
 			c.Logger.Debug().
 				Str("url", url).
@@ -193,25 +197,34 @@ func (c *Client) MakeRequest(ctx context.Context, url string, method string, hea
 				Msg("Request successful")
 			return resp, respDat, nil
 		} else if attempts > MaxHTTPRetries {
-			c.Logger.Err(err).
+			logEvt := c.Logger.Err(err).
 				Str("url", url).
 				Str("method", method).
-				Dur("duration", dur).
-				Msg("Request failed, giving up")
-			return nil, nil, fmt.Errorf("%w: %w", ErrMaxRetriesReached, err)
+				Dur("duration", dur)
+			if resp != nil {
+				logEvt = logEvt.Int("status_code", resp.StatusCode)
+			}
+			logEvt.Msg("Request failed, giving up")
+			return lastResp, lastBody, fmt.Errorf("%w: %w", ErrMaxRetriesReached, err)
 		} else if isPermanentRequestError(err) || ctx.Err() != nil {
-			c.Logger.Err(err).
+			logEvt := c.Logger.Err(err).
 				Str("url", url).
 				Str("method", method).
-				Dur("duration", dur).
-				Msg("Request failed, cannot be retried")
-			return nil, nil, err
+				Dur("duration", dur)
+			if resp != nil {
+				logEvt = logEvt.Int("status_code", resp.StatusCode)
+			}
+			logEvt.Msg("Request failed, cannot be retried")
+			return resp, respDat, err
 		}
-		c.Logger.Err(err).
+		logEvt := c.Logger.Err(err).
 			Str("url", url).
 			Str("method", method).
-			Dur("duration", dur).
-			Msg("Request failed, retrying")
+			Dur("duration", dur)
+		if resp != nil {
+			logEvt = logEvt.Int("status_code", resp.StatusCode)
+		}
+		logEvt.Msg("Request failed, retrying")
 		time.Sleep(time.Duration(attempts) * 3 * time.Second)
 	}
 }
@@ -245,7 +258,7 @@ func (c *Client) makeRequestDirect(ctx context.Context, url string, method strin
 	}
 
 	if response.StatusCode >= 500 {
-		return nil, nil, fmt.Errorf("%w: %d", ErrServerError, response.StatusCode)
+		return response, responseBody, fmt.Errorf("%w: %d", ErrServerError, response.StatusCode)
 	}
 
 	return response, responseBody, nil

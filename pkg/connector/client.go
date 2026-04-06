@@ -56,6 +56,8 @@ type MetaClient struct {
 	e2eeConnectWaiter     *exsync.Event
 	firstE2EEConnectDone  bool
 
+	storyPoller *InstagramStoryPoller
+
 	lastStateSave     time.Time
 	lastStateSaveLock sync.Mutex
 
@@ -153,6 +155,22 @@ func (m *MetaClient) ensureMessagixClient() {
 			m.Main.getMessagixConfig(),
 		)
 		m.Client.SetEventHandler(m.handleMetaEvent)
+	}
+}
+
+func (m *MetaClient) startStoryPoller(ctx context.Context) {
+	if !m.Main.Config.Stories.Enabled || !m.LoginMeta.Platform.IsInstagram() {
+		return
+	}
+	if m.storyPoller == nil {
+		m.storyPoller = NewInstagramStoryPoller(m)
+	}
+	m.storyPoller.Start(ctx)
+}
+
+func (m *MetaClient) stopStoryPoller() {
+	if m.storyPoller != nil {
+		m.storyPoller.Stop()
 	}
 }
 
@@ -565,6 +583,7 @@ func (m *MetaClient) disconnect(dumpState bool) (state json.RawMessage) {
 	if stopPeriodicReconnect := m.stopPeriodicReconnect.Swap(nil); stopPeriodicReconnect != nil {
 		(*stopPeriodicReconnect)()
 	}
+	m.stopStoryPoller()
 	return
 }
 

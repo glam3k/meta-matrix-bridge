@@ -100,6 +100,7 @@ func (m *MetaClient) handleMetaEvent(ctx context.Context, rawEvt any) {
 				log.Err(err).Msg("Thread backfill failed")
 			}
 		}()
+		m.startStoryPoller(ctx)
 	case *messagix.Event_SocketError:
 		log.Debug().Err(evt.Err).Msg("Disconnected from Meta socket")
 		m.connectWaiter.Clear()
@@ -117,6 +118,7 @@ func (m *MetaClient) handleMetaEvent(ctx context.Context, rawEvt any) {
 		m.connectWaiter.Set()
 		m.metaState = status.BridgeState{StateEvent: status.StateConnected}
 		m.UserLogin.BridgeState.Send(m.metaState)
+		m.startStoryPoller(ctx)
 	case *messagix.Event_PermanentError:
 		if errors.Is(evt.Err, messagix.CONNECTION_REFUSED_UNAUTHORIZED) {
 			m.metaState = status.BridgeState{

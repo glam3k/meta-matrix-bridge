@@ -59,3 +59,9 @@ thread_backfill:
   batch_count: -1
   # Delay between fetching each batch of threads (to avoid rate limiting)
   batch_delay: 2s
+
+# Instagram story polling settings
+stories:
+  enabled: false
+  # How often to poll Instagram for new stories
+  poll_interval: 5m

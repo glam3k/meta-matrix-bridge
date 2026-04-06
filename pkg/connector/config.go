@@ -47,11 +47,19 @@ type Config struct {
 	MarketplaceSpace                 bool `yaml:"marketplace_space"`
 
 	ThreadBackfill ThreadBackfillConfig `yaml:"thread_backfill"`
+	Stories        StoriesConfig        `yaml:"stories"`
 }
+
+const defaultStoryPollInterval = 5 * time.Minute
 
 type ThreadBackfillConfig struct {
 	BatchCount int           `yaml:"batch_count"`
 	BatchDelay time.Duration `yaml:"batch_delay"`
+}
+
+type StoriesConfig struct {
+	Enabled      bool          `yaml:"enabled"`
+	PollInterval time.Duration `yaml:"poll_interval"`
 }
 
 type umConfig Config
@@ -78,6 +86,9 @@ func (c *Config) PostProcess() (err error) {
 		c.AllowedModes = append(c.AllowedModes, mode)
 	}
 	c.displaynameTemplate, err = template.New("displayname").Parse(c.DisplaynameTemplate)
+	if c.Stories.PollInterval == 0 {
+		c.Stories.PollInterval = defaultStoryPollInterval
+	}
 	return err
 }
 
@@ -101,6 +112,8 @@ func upgradeConfig(helper up.Helper) {
 	helper.Copy(up.Bool, "marketplace_space")
 	helper.Copy(up.Int, "thread_backfill", "batch_count")
 	helper.Copy(up.Str|up.Int, "thread_backfill", "batch_delay")
+	helper.Copy(up.Bool, "stories", "enabled")
+	helper.Copy(up.Str|up.Int, "stories", "poll_interval")
 }
 
 func (m *MetaConnector) GetConfig() (string, any, up.Upgrader) {
