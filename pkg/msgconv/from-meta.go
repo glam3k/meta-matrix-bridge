@@ -48,8 +48,11 @@ import (
 	"go.mau.fi/mautrix-meta/pkg/messagix/data/responses"
 	"go.mau.fi/mautrix-meta/pkg/messagix/socket"
 	"go.mau.fi/mautrix-meta/pkg/messagix/table"
+	"go.mau.fi/mautrix-meta/pkg/messagix/types"
 	"go.mau.fi/mautrix-meta/pkg/metaid"
 )
+
+const storyMetadataKey = "fi.mau.meta.story"
 
 func (mc *MessageConverter) ShouldFetchXMA(ctx context.Context) bool {
 	return ctx.Value(contextKeyFetchXMA).(bool)
@@ -221,6 +224,27 @@ func (mc *MessageConverter) ToMatrix(
 				} else {
 					extra["com.beeper.relation_preview_type"] = "story"
 				}
+				storyExtra := map[string]any{
+					"source_platform": types.Instagram.String(),
+				}
+				if msg.ReplySourceId != "" {
+					storyExtra["source_story_id"] = msg.ReplySourceId
+				}
+				if msg.ReplyToUserId != 0 {
+					storyExtra["source_author_id"] = strconv.FormatInt(msg.ReplyToUserId, 10)
+				}
+				if msg.ReplySourceTimestampMs != 0 {
+					storyExtra["posted_at"] = msg.ReplySourceTimestampMs
+				}
+				if msg.ReplyMediaExpirationTimestampMs != 0 {
+					storyExtra["expires_at"] = msg.ReplyMediaExpirationTimestampMs
+				}
+				if isReaction {
+					storyExtra["is_story_reaction"] = true
+				} else {
+					storyExtra["is_story_reply"] = true
+				}
+				extra[storyMetadataKey] = storyExtra
 			default:
 			}
 		}

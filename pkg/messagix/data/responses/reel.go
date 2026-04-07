@@ -9,6 +9,11 @@ type ReelInfoResponse struct {
 	Status     string              `json:"status,omitempty"`
 }
 
+type ReelsTrayResponse struct {
+	Tray   []ReelInfo `json:"tray,omitempty"`
+	Status string     `json:"status,omitempty"`
+}
+
 type ReelInfo struct {
 	ID                          string      `json:"id,omitempty"`
 	StrongID                    string      `json:"strong_id__,omitempty"`

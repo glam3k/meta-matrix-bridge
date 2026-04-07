@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strconv"
 	"time"
 
@@ -48,8 +49,11 @@ func (m *MetaConnector) GenerateTransactionID(userID id.UserID, roomID id.RoomID
 }
 
 var (
-	ErrServerRejectedMessage = bridgev2.WrapErrorInStatus(errors.New("server rejected message")).WithErrorAsMessage().WithSendNotice(true)
-	ErrNotConnected          = bridgev2.WrapErrorInStatus(errors.New("not connected")).WithErrorAsMessage().WithSendNotice(true)
+	ErrServerRejectedMessage        = bridgev2.WrapErrorInStatus(errors.New("server rejected message")).WithErrorAsMessage().WithSendNotice(true)
+	ErrNotConnected                 = bridgev2.WrapErrorInStatus(errors.New("not connected")).WithErrorAsMessage().WithSendNotice(true)
+	ErrStoryRepliesInstagramOnly    = bridgev2.WrapErrorInStatus(errors.New("story replies are only supported on Instagram logins")).WithIsCertain(true).WithErrorAsMessage().WithSendNotice(true).WithErrorReason(event.MessageStatusUnsupported)
+	ErrStoryReplyUnsupportedContent = bridgev2.WrapErrorInStatus(errors.New("story replies currently support only text messages")).WithIsCertain(true).WithErrorAsMessage().WithSendNotice(true).WithErrorReason(event.MessageStatusUnsupported)
+	ErrStoryRepliesDisabled         = bridgev2.WrapErrorInStatus(errors.New("story replies are disabled for this story")).WithIsCertain(true).WithErrorAsMessage().WithSendNotice(true).WithErrorReason(event.MessageStatusUnsupported)
 )
 
 const ConnectWaitTimeout = 1 * time.Minute
@@ -106,6 +110,10 @@ func (m *MetaClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Matr
 			return nil, ErrNotConnected
 		}
 
+		if resp, handled, err := m.tryInstagramStoryReply(ctx, msg); handled {
+			return resp, err
+		}
+
 		tasks, err := m.Main.MsgConv.ToMeta(
 			ctx, m.Client, msg.Event, msg.Content, msg.ReplyTo, msg.ThreadRoot, otid, msg.OrigSender != nil, msg.Portal,
 		)
@@ -133,6 +141,10 @@ func (m *MetaClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Matr
 			})
 			return nil, err
 		} else if err != nil {
+			var statusErr bridgev2.MessageStatus
+			if errors.As(err, &statusErr) {
+				return nil, statusErr
+			}
 			return nil, fmt.Errorf("failed to convert message: %w", err)
 		}
 
@@ -651,6 +663,61 @@ func (m *MetaClient) HandleMatrixTyping(ctx context.Context, msg *bridgev2.Matri
 		SyncGroup:     1,
 		ThreadType:    int64(portalMeta.ThreadType),
 	})
+}
+
+func (m *MetaClient) tryInstagramStoryReply(ctx context.Context, msg *bridgev2.MatrixMessage) (*bridgev2.MatrixMessageResponse, bool, error) {
+	if msg.ReplyTo == nil {
+		return nil, false, nil
+	}
+	meta, ok := msg.ReplyTo.Metadata.(*metaid.MessageMetadata)
+	if !ok || meta == nil || meta.Story == nil {
+		return nil, false, nil
+	}
+	if !m.LoginMeta.Platform.IsInstagram() {
+		return nil, true, ErrStoryRepliesInstagramOnly
+	}
+	if msg.Content.MsgType != event.MsgText && msg.Content.MsgType != event.MsgNotice && msg.Content.MsgType != event.MsgEmote {
+		return nil, true, ErrStoryReplyUnsupportedContent
+	}
+	if meta.Story.StoryID == "" || meta.Story.ReelID == "" {
+		return nil, true, ErrStoryReplyUnsupportedContent
+	}
+	if meta.Story.CanReply != nil && !*meta.Story.CanReply {
+		return nil, true, ErrStoryRepliesDisabled
+	}
+	if len(meta.Story.DisabledReplyTypes) > 0 && slices.Contains(meta.Story.DisabledReplyTypes, "text") {
+		return nil, true, ErrStoryRepliesDisabled
+	}
+	threadID := ""
+	itemID, err := m.Client.Instagram.SendStoryReply(ctx, threadID, meta.Story.StoryID, meta.Story.ReelID, msg.Content.Body)
+	if err != nil {
+		zerolog.Ctx(ctx).Error().
+			Str("portal_id", string(msg.Portal.ID)).
+			Str("story_id", meta.Story.StoryID).
+			Str("story_reel_id", meta.Story.ReelID).
+			Err(err).
+			Msg("Failed to send Instagram story reply")
+		return nil, true, err
+	}
+	zerolog.Ctx(ctx).Info().
+		Str("portal_id", string(msg.Portal.ID)).
+		Str("story_id", meta.Story.StoryID).
+		Str("story_reel_id", meta.Story.ReelID).
+		Str("item_id", itemID).
+		Msg("Sent Instagram story reply")
+	now := time.Now()
+	resp := &bridgev2.MatrixMessageResponse{
+		DB: &database.Message{
+			ID:               metaid.MakeFBMessageID(itemID),
+			Room:             msg.Portal.PortalKey,
+			SenderID:         networkid.UserID(m.UserLogin.ID),
+			SenderMXID:       msg.Event.Sender,
+			Timestamp:        now,
+			IsDoublePuppeted: msg.OrigSender != nil,
+		},
+		StreamOrder: now.UnixMilli(),
+	}
+	return resp, true, nil
 }
 
 func (t *MetaClient) HandleMatrixDeleteChat(ctx context.Context, chat *bridgev2.MatrixDeleteChat) error {
