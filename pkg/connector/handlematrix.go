@@ -724,13 +724,7 @@ func (m *MetaClient) tryMessengerStoryReply(ctx context.Context, msg *bridgev2.M
 		return nil, true, ErrStoryRepliesDisabled
 	}
 	otid := getOTID(msg.InputTransactionID)
-	actorID := story.AuthorID
-	if actorID == "" {
-		actorID = story.ReelID
-	}
-	if actorID == "" {
-		actorID = string(m.UserLogin.ID)
-	}
+	actorID := string(m.UserLogin.ID)
 	input := &messagix.FacebookStoryReplyInput{
 		Message:          msg.Content.Body,
 		StoryID:          story.StoryID,
