@@ -73,6 +73,9 @@ func (fb *FacebookMethods) SendStoryReply(ctx context.Context, input *FacebookSt
 		return "", fmt.Errorf("failed to decode story reply response: %w", err)
 	}
 	if resp.Data.DirectMessageReply == nil {
+		if fb.client != nil {
+			fb.client.Logger.Warn().RawJSON("response", data).Msg("Messenger story reply response missing data")
+		}
 		return "", fmt.Errorf("story reply response missing data")
 	}
 	return resp.Data.DirectMessageReply.ClientMutationID, nil
