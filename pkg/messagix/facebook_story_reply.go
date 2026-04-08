@@ -106,6 +106,11 @@ func (fb *FacebookMethods) VerifyContactCapabilities(ctx context.Context, userID
 	if capStr == "" {
 		return 0, fmt.Errorf("capability response missing value")
 	}
+	if fb.client.Logger.GetLevel() <= zerolog.DebugLevel {
+		fb.client.Logger.Debug().
+			Str("capability_str", capStr).
+			Msg("Messenger story capability mask")
+	}
 	capabilities, err := strconv.ParseUint(capStr, 10, 64)
 	if err != nil {
 		return 0, fmt.Errorf("failed to parse capability mask: %w", err)
