@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/rs/zerolog"
+
 	"go.mau.fi/mautrix-meta/pkg/messagix/data/responses"
 	"go.mau.fi/mautrix-meta/pkg/messagix/types"
 )
@@ -53,6 +55,13 @@ func (fb *FacebookMethods) getStoryAttributionID(ctx context.Context) (string, e
 		return "", fmt.Errorf("failed to fetch stories bootstrap: %w", err)
 	}
 	body = bytes.TrimPrefix(body, antiJSPrefix)
+	if fb.client.Logger.GetLevel() <= zerolog.DebugLevel {
+		preview := body
+		if len(preview) > 1024 {
+			preview = preview[:1024]
+		}
+		fb.client.Logger.Debug().RawJSON("stories_bootstrap_sample", preview).Msg("Fetched stories bootstrap")
+	}
 	match := storyAttributionRegex.Find(body)
 	if match == nil {
 		return "", fmt.Errorf("stories attribution id not found in bootstrap")
