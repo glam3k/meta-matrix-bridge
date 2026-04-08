@@ -725,10 +725,16 @@ func (m *MetaClient) tryMessengerStoryReply(ctx context.Context, msg *bridgev2.M
 	}
 	otid := getOTID(msg.InputTransactionID)
 	actorID := string(m.UserLogin.ID)
+	threadID := metaid.ParseFBPortalID(msg.Portal.ID)
+	threadIDStr := ""
+	if threadID != 0 {
+		threadIDStr = strconv.FormatInt(threadID, 10)
+	}
 	input := &messagix.FacebookStoryReplyInput{
 		Message:          msg.Content.Body,
 		StoryID:          story.StoryID,
 		StoryReelID:      story.ReelID,
+		ThreadID:         threadIDStr,
 		StoryReplyType:   "TEXT",
 		ActorID:          actorID,
 		ClientMutationID: strconv.FormatInt(otid, 10),

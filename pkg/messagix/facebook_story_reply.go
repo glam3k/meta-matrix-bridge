@@ -29,6 +29,7 @@ type FacebookStoryReplyInput struct {
 	Message          string `json:"message,omitempty"`
 	StoryID          string `json:"story_id"`
 	StoryReelID      string `json:"story_reel_id,omitempty"`
+	ThreadID         string `json:"thread_id,omitempty"`
 	StoryReplyType   string `json:"story_reply_type"`
 	ActorID          string `json:"actor_id"`
 	ClientMutationID string `json:"client_mutation_id"`
