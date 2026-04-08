@@ -84,6 +84,11 @@ func (fb *FacebookMethods) VerifyContactCapabilities(ctx context.Context, userID
 		return 0, fmt.Errorf("facebook client unavailable")
 	}
 	vars := &fbVerifyThreadCapabilitiesVariables{ID: userID}
+	if fb.client.Logger.GetLevel() <= zerolog.DebugLevel {
+		if payload, err := json.Marshal(vars); err == nil {
+			fb.client.Logger.Debug().RawJSON("story_capability_vars", payload).Msg("Fetching Messenger story capabilities")
+		}
+	}
 	_, data, err := fb.client.makeGraphQLRequest(ctx, "FBVerifyThreadContactCapabilities", vars)
 	if err != nil {
 		return 0, err
@@ -121,6 +126,11 @@ func (fb *FacebookMethods) SendStoryReply(ctx context.Context, input *FacebookSt
 		input.AttributionID = attr
 	}
 	vars := &fbStoryReplyVariables{Input: *input}
+	if fb.client.Logger.GetLevel() <= zerolog.DebugLevel {
+		if payload, err := json.Marshal(vars); err == nil {
+			fb.client.Logger.Debug().RawJSON("story_reply_vars", payload).Msg("Sending Messenger story reply")
+		}
+	}
 	_, data, err := fb.client.makeGraphQLRequest(ctx, "FBStoriesSendReply", vars)
 	if err != nil {
 		return "", err
