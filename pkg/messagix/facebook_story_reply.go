@@ -60,7 +60,7 @@ func (fb *FacebookMethods) getStoryAttributionID(ctx context.Context) (string, e
 		if len(preview) > 1024 {
 			preview = preview[:1024]
 		}
-		fb.client.Logger.Debug().RawJSON("stories_bootstrap_sample", preview).Msg("Fetched stories bootstrap")
+		fb.client.Logger.Debug().Str("stories_bootstrap_sample", string(preview)).Msg("Fetched stories bootstrap")
 	}
 	match := storyAttributionRegex.Find(body)
 	attr := ""
