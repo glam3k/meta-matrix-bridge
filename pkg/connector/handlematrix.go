@@ -52,6 +52,7 @@ var (
 	ErrServerRejectedMessage        = bridgev2.WrapErrorInStatus(errors.New("server rejected message")).WithErrorAsMessage().WithSendNotice(true)
 	ErrNotConnected                 = bridgev2.WrapErrorInStatus(errors.New("not connected")).WithErrorAsMessage().WithSendNotice(true)
 	ErrStoryRepliesInstagramOnly    = bridgev2.WrapErrorInStatus(errors.New("story replies are only supported on Instagram logins")).WithIsCertain(true).WithErrorAsMessage().WithSendNotice(true).WithErrorReason(event.MessageStatusUnsupported)
+	ErrStoryRepliesMessengerOnly    = bridgev2.WrapErrorInStatus(errors.New("story replies are only supported on Messenger logins")).WithIsCertain(true).WithErrorAsMessage().WithSendNotice(true).WithErrorReason(event.MessageStatusUnsupported)
 	ErrStoryReplyUnsupportedContent = bridgev2.WrapErrorInStatus(errors.New("story replies currently support only text messages")).WithIsCertain(true).WithErrorAsMessage().WithSendNotice(true).WithErrorReason(event.MessageStatusUnsupported)
 	ErrStoryRepliesDisabled         = bridgev2.WrapErrorInStatus(errors.New("story replies are disabled for this story")).WithIsCertain(true).WithErrorAsMessage().WithSendNotice(true).WithErrorReason(event.MessageStatusUnsupported)
 )
@@ -108,6 +109,10 @@ func (m *MetaClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Matr
 	default:
 		if !m.connectWaiter.WaitTimeout(ConnectWaitTimeout) {
 			return nil, ErrNotConnected
+		}
+
+		if resp, handled, err := m.tryMessengerStoryReply(ctx, msg); handled {
+			return resp, err
 		}
 
 		if resp, handled, err := m.tryInstagramStoryReply(ctx, msg); handled {
@@ -663,6 +668,98 @@ func (m *MetaClient) HandleMatrixTyping(ctx context.Context, msg *bridgev2.Matri
 		SyncGroup:     1,
 		ThreadType:    int64(portalMeta.ThreadType),
 	})
+}
+
+func buildMessengerStoryAttributionID(otid int64) string {
+	now := time.Now().UnixMilli()
+	seq := otid % 1000000
+	if seq < 0 {
+		seq = -seq
+	}
+	if seq < 100000 {
+		seq += 100000
+	}
+	return fmt.Sprintf("StoriesCometSuspenseRoot.react,comet.stories.viewer,via_cold_start,%d,%d,,,", now, seq)
+}
+
+func (m *MetaClient) tryMessengerStoryReply(ctx context.Context, msg *bridgev2.MatrixMessage) (*bridgev2.MatrixMessageResponse, bool, error) {
+	if msg.ReplyTo == nil {
+		return nil, false, nil
+	}
+	meta, ok := msg.ReplyTo.Metadata.(*metaid.MessageMetadata)
+	if !ok || meta == nil || meta.Story == nil {
+		return nil, false, nil
+	}
+	story := meta.Story
+	switch story.Platform {
+	case "", types.Messenger.String(), types.Facebook.String(), types.FacebookTor.String():
+	default:
+		return nil, false, nil
+	}
+	if !m.LoginMeta.Platform.IsMessenger() {
+		return nil, true, ErrStoryRepliesMessengerOnly
+	}
+	if msg.Content.MsgType != event.MsgText && msg.Content.MsgType != event.MsgNotice && msg.Content.MsgType != event.MsgEmote {
+		return nil, true, ErrStoryReplyUnsupportedContent
+	}
+	if story.StoryID == "" {
+		return nil, true, ErrStoryReplyUnsupportedContent
+	}
+	if story.CanReply != nil && !*story.CanReply {
+		return nil, true, ErrStoryRepliesDisabled
+	}
+	if len(story.DisabledReplyTypes) > 0 && slices.Contains(story.DisabledReplyTypes, "text") {
+		return nil, true, ErrStoryRepliesDisabled
+	}
+	authorID := story.AuthorID
+	if authorID == "" && msg.ReplyTo.SenderID != "" {
+		authorID = string(msg.ReplyTo.SenderID)
+	}
+	if authorID == "" {
+		return nil, true, fmt.Errorf("missing story author metadata for reply")
+	}
+	cli := m.Client
+	if cli == nil || cli.Facebook == nil {
+		return nil, true, fmt.Errorf("messenger story client unavailable")
+	}
+	caps, err := cli.Facebook.VerifyContactCapabilities(ctx, authorID)
+	if err != nil {
+		zerolog.Ctx(ctx).Err(err).
+			Str("author_id", authorID).
+			Msg("Failed to verify Messenger story capabilities")
+		return nil, true, err
+	}
+	if caps == 0 {
+		zerolog.Ctx(ctx).Warn().
+			Str("author_id", authorID).
+			Msg("Messenger story reply disabled due to missing capabilities")
+		return nil, true, ErrStoryRepliesDisabled
+	}
+	otid := getOTID(msg.InputTransactionID)
+	input := &messagix.FacebookStoryReplyInput{
+		AttributionID:    buildMessengerStoryAttributionID(otid),
+		Message:          msg.Content.Body,
+		StoryID:          story.StoryID,
+		StoryReplyType:   "TEXT",
+		ActorID:          string(m.UserLogin.ID),
+		ClientMutationID: strconv.FormatInt(otid, 10),
+	}
+	if input.Message == "" && msg.Content.MsgType == event.MsgText {
+		return nil, true, ErrStoryReplyUnsupportedContent
+	}
+	if _, err := cli.Facebook.SendStoryReply(ctx, input); err != nil {
+		zerolog.Ctx(ctx).Error().
+			Str("story_id", story.StoryID).
+			Str("author_id", authorID).
+			Err(err).
+			Msg("Failed to send Messenger story reply")
+		return nil, true, err
+	}
+	zerolog.Ctx(ctx).Info().
+		Str("story_id", story.StoryID).
+		Str("author_id", authorID).
+		Msg("Sent Messenger story reply")
+	return nil, true, nil
 }
 
 func (m *MetaClient) tryInstagramStoryReply(ctx context.Context, msg *bridgev2.MatrixMessage) (*bridgev2.MatrixMessageResponse, bool, error) {

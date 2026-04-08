@@ -56,6 +56,16 @@ var GraphQLDocs = map[string]GraphQLDoc{
 		CallerClass:  "RelayModern",
 		FriendlyName: "StoriesViewerBucketPrefetcherMultiBucketsQuery",
 	},
+	"FBVerifyThreadContactCapabilities": {
+		DocId:        "9948369021930229",
+		CallerClass:  "RelayModern",
+		FriendlyName: "MAWVerifyThreadCutover_ContactCapabilities2Query",
+	},
+	"FBStoriesSendReply": {
+		DocId:        "9697491553691692",
+		CallerClass:  "RelayModern",
+		FriendlyName: "useStoriesSendReplyMutation",
+	},
 }
 
 type IGDeleteThreadGraphQLRequestPayload struct {
