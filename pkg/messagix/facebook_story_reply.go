@@ -1,13 +1,22 @@
 package messagix
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"html"
+	"regexp"
 	"strconv"
+	"time"
 
 	"go.mau.fi/mautrix-meta/pkg/messagix/data/responses"
+	"go.mau.fi/mautrix-meta/pkg/messagix/types"
 )
+
+var storyAttributionRegex = regexp.MustCompile(`StoriesCometSuspenseRoot\.react,comet\.stories\.viewer,[^"\\]+`)
+
+const storyAttributionCacheTTL = 30 * time.Minute
 
 type fbVerifyThreadCapabilitiesVariables struct {
 	ID string `json:"id"`
@@ -24,6 +33,36 @@ type FacebookStoryReplyInput struct {
 
 type fbStoryReplyVariables struct {
 	Input FacebookStoryReplyInput `json:"input"`
+}
+
+func (fb *FacebookMethods) getStoryAttributionID(ctx context.Context) (string, error) {
+	if fb == nil || fb.client == nil {
+		return "", fmt.Errorf("facebook client unavailable")
+	}
+	fb.storyAttrMu.Lock()
+	cached := fb.storyAttributionID
+	validUntil := fb.storyAttributionSeen.Add(storyAttributionCacheTTL)
+	fb.storyAttrMu.Unlock()
+	if cached != "" && time.Now().Before(validUntil) {
+		return cached, nil
+	}
+	headers := fb.client.buildHeaders(true, true)
+	storiesURL := fb.client.GetEndpoint("base_url") + "/stories"
+	_, body, err := fb.client.MakeRequest(ctx, storiesURL, "GET", headers, nil, types.NONE)
+	if err != nil {
+		return "", fmt.Errorf("failed to fetch stories bootstrap: %w", err)
+	}
+	body = bytes.TrimPrefix(body, antiJSPrefix)
+	match := storyAttributionRegex.Find(body)
+	if match == nil {
+		return "", fmt.Errorf("stories attribution id not found in bootstrap")
+	}
+	attr := html.UnescapeString(string(match))
+	fb.storyAttrMu.Lock()
+	fb.storyAttributionID = attr
+	fb.storyAttributionSeen = time.Now()
+	fb.storyAttrMu.Unlock()
+	return attr, nil
 }
 
 func (fb *FacebookMethods) VerifyContactCapabilities(ctx context.Context, userID string) (uint64, error) {
@@ -62,6 +101,13 @@ func (fb *FacebookMethods) SendStoryReply(ctx context.Context, input *FacebookSt
 	}
 	if fb == nil || fb.client == nil {
 		return "", fmt.Errorf("facebook client unavailable")
+	}
+	if input.AttributionID == "" {
+		attr, err := fb.getStoryAttributionID(ctx)
+		if err != nil {
+			return "", fmt.Errorf("failed to get story attribution: %w", err)
+		}
+		input.AttributionID = attr
 	}
 	vars := &fbStoryReplyVariables{Input: *input}
 	_, data, err := fb.client.makeGraphQLRequest(ctx, "FBStoriesSendReply", vars)

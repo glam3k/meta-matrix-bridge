@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync"
+	"time"
 
 	"github.com/google/go-querystring/query"
 	"go.mau.fi/util/jsonbytes"
@@ -14,7 +16,10 @@ import (
 )
 
 type FacebookMethods struct {
-	client *Client
+	client               *Client
+	storyAttrMu          sync.Mutex
+	storyAttributionID   string
+	storyAttributionSeen time.Time
 }
 
 type PushKeys struct {

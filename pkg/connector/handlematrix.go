@@ -670,18 +670,6 @@ func (m *MetaClient) HandleMatrixTyping(ctx context.Context, msg *bridgev2.Matri
 	})
 }
 
-func buildMessengerStoryAttributionID(otid int64) string {
-	now := time.Now().UnixMilli()
-	seq := otid % 1000000
-	if seq < 0 {
-		seq = -seq
-	}
-	if seq < 100000 {
-		seq += 100000
-	}
-	return fmt.Sprintf("StoriesCometSuspenseRoot.react,comet.stories.viewer,via_cold_start,%d,%d,,,", now, seq)
-}
-
 func (m *MetaClient) tryMessengerStoryReply(ctx context.Context, msg *bridgev2.MatrixMessage) (*bridgev2.MatrixMessageResponse, bool, error) {
 	if msg.ReplyTo == nil {
 		return nil, false, nil
@@ -737,7 +725,6 @@ func (m *MetaClient) tryMessengerStoryReply(ctx context.Context, msg *bridgev2.M
 	}
 	otid := getOTID(msg.InputTransactionID)
 	input := &messagix.FacebookStoryReplyInput{
-		AttributionID:    buildMessengerStoryAttributionID(otid),
 		Message:          msg.Content.Body,
 		StoryID:          story.StoryID,
 		StoryReplyType:   "TEXT",
