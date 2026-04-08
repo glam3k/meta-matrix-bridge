@@ -63,10 +63,12 @@ func (fb *FacebookMethods) getStoryAttributionID(ctx context.Context) (string, e
 		fb.client.Logger.Debug().RawJSON("stories_bootstrap_sample", preview).Msg("Fetched stories bootstrap")
 	}
 	match := storyAttributionRegex.Find(body)
-	if match == nil {
-		return "", fmt.Errorf("stories attribution id not found in bootstrap")
+	attr := ""
+	if match != nil {
+		attr = html.UnescapeString(string(match))
+	} else {
+		fb.client.Logger.Warn().Msg("Stories bootstrap did not include attribution ID, sending replies without it")
 	}
-	attr := html.UnescapeString(string(match))
 	fb.storyAttrMu.Lock()
 	fb.storyAttributionID = attr
 	fb.storyAttributionSeen = time.Now()
