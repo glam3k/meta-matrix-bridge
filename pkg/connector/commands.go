@@ -10,6 +10,7 @@ import (
 	"maunium.net/go/mautrix/id"
 
 	"go.mau.fi/mautrix-meta/pkg/messagix/table"
+	"go.mau.fi/mautrix-meta/pkg/messagix/types"
 	"go.mau.fi/mautrix-meta/pkg/metaid"
 )
 
@@ -29,7 +30,7 @@ var cmdStorySettings = &commands.FullHandler{
 	Name: "stories",
 	Help: commands.HelpMeta{
 		Section:     commands.HelpSectionChats,
-		Description: "Manage Instagram story delivery in this room",
+		Description: "Manage story delivery in this room",
 	},
 	RequiresPortal: true,
 	RequiresLogin:  true,
@@ -93,13 +94,44 @@ func fnStorySettings(ce *commands.Event) {
 		ce.Reply("You must be logged in to manage story settings")
 		return
 	}
-	if !login.Metadata.(*metaid.UserLoginMetadata).Platform.IsInstagram() {
-		ce.Reply("Stories can only be managed for Instagram logins")
+	loginPlatform := login.Metadata.(*metaid.UserLoginMetadata).Platform
+	if !loginPlatform.IsInstagram() && !loginPlatform.IsMessenger() {
+		ce.Reply("Stories can only be managed for Instagram or Messenger logins")
+		return
+	}
+	platformArgIdx := 1
+	platformName := ""
+	if len(ce.Args) > 1 {
+		candidate := strings.ToLower(ce.Args[1])
+		if candidate == "all" {
+			platformName = candidate
+			platformArgIdx = 2
+		} else if !strings.HasPrefix(candidate, "@") {
+			platformName = candidate
+			platformArgIdx = 2
+		}
+	}
+	var targetPlatform types.Platform
+	applyToAll := false
+	if platformName == "all" {
+		applyToAll = true
+	} else if platformName != "" {
+		targetPlatform = types.PlatformFromString(platformName)
+		if !targetPlatform.IsValid() {
+			ce.Reply("Unknown platform %s. Use instagram, messenger, or all.", platformName)
+			return
+		}
+	}
+	if !applyToAll && !targetPlatform.IsValid() {
+		targetPlatform = loginPlatform
+	}
+	if !applyToAll && !storyPlatformAllowed(loginPlatform, targetPlatform) {
+		ce.Reply("This login cannot manage %s stories", formatStoryPlatform(targetPlatform))
 		return
 	}
 	target := ""
-	if len(ce.Args) > 1 {
-		target = ce.Args[1]
+	if len(ce.Args) > platformArgIdx {
+		target = ce.Args[platformArgIdx]
 	}
 	ghost, err := conn.resolveStoryGhost(ce, target)
 	if err != nil {
@@ -116,25 +148,39 @@ func fnStorySettings(ce *commands.Event) {
 	}
 	switch action {
 	case "on", "enable", "yes", "true":
-		err = conn.setStorySetting(ce.Ctx, ce.Portal, ghost.Intent.GetMXID(), true)
+		err = conn.setStorySetting(ce.Ctx, ce.Portal, ghost.Intent.GetMXID(), targetPlatform, applyToAll, true)
 		if err != nil {
 			ce.Log.Err(err).Msg("Failed to enable stories")
 			ce.Reply("Failed to enable stories for %s", ghost.Intent.GetMXID())
 			return
 		}
-		ce.Reply("Stories from %s enabled in this room", ghost.Intent.GetMXID())
+		if applyToAll {
+			ce.Reply("Stories from %s enabled for all platforms in this room", ghost.Intent.GetMXID())
+		} else {
+			ce.Reply("%s stories from %s enabled in this room", formatStoryPlatform(targetPlatform), ghost.Intent.GetMXID())
+		}
 	case "off", "disable", "no", "false":
-		err = conn.setStorySetting(ce.Ctx, ce.Portal, ghost.Intent.GetMXID(), false)
+		err = conn.setStorySetting(ce.Ctx, ce.Portal, ghost.Intent.GetMXID(), targetPlatform, applyToAll, false)
 		if err != nil {
 			ce.Log.Err(err).Msg("Failed to disable stories")
 			ce.Reply("Failed to disable stories for %s", ghost.Intent.GetMXID())
 			return
 		}
-		ce.Reply("Stories from %s disabled in this room", ghost.Intent.GetMXID())
+		if applyToAll {
+			ce.Reply("Stories from %s disabled for all platforms in this room", ghost.Intent.GetMXID())
+		} else {
+			ce.Reply("%s stories from %s disabled in this room", formatStoryPlatform(targetPlatform), ghost.Intent.GetMXID())
+		}
 	case "status":
-		conn.replyStoryStatus(ce, ghost)
+		settings, err := conn.getStorySettingsContent(ce.Ctx, ce.Portal, ghost.Intent.GetMXID())
+		if err != nil {
+			ce.Log.Err(err).Msg("Failed to read story settings")
+			ce.Reply("Failed to read story settings")
+			return
+		}
+		conn.replyStoryStatus(ce, ghost, settings, loginPlatform, targetPlatform, applyToAll)
 	default:
-		ce.Reply("Usage: !bridge stories <on|off|status> [@ghost]")
+		ce.Reply("Usage: !bridge stories <on|off|status> [platform] [@ghost]")
 	}
 }
 
@@ -165,16 +211,53 @@ func (m *MetaConnector) resolveStoryGhost(ce *commands.Event, target string) (*b
 	return ghost, nil
 }
 
-func (m *MetaConnector) replyStoryStatus(ce *commands.Event, ghost *bridgev2.Ghost) {
-	enabled, err := m.getStorySetting(ce.Ctx, ce.Portal, ghost.Intent.GetMXID())
-	if err != nil {
-		ce.Log.Err(err).Msg("Failed to read story settings")
-		ce.Reply("Failed to read story settings")
+func (m *MetaConnector) replyStoryStatus(ce *commands.Event, ghost *bridgev2.Ghost, settings *storySettingsContent, loginPlatform types.Platform, targetPlatform types.Platform, applyToAll bool) {
+	if settings == nil {
+		settings = newStorySettingsContent(m.Config.Stories.DefaultEnabled)
+	}
+	describe := func(val bool) string {
+		if val {
+			return "enabled"
+		}
+		return "disabled"
+	}
+	ghostMXID := ghost.Intent.GetMXID()
+	if applyToAll {
+		ce.Reply("Default stories from %s are %s in this room", ghostMXID, describe(settings.ReceiveStories))
 		return
 	}
-	state := "disabled"
-	if enabled {
-		state = "enabled"
+	if targetPlatform.IsValid() && targetPlatform != loginPlatform {
+		ce.Reply("%s stories from %s are %s in this room", formatStoryPlatform(targetPlatform), ghostMXID, describe(settings.enabledFor(targetPlatform)))
+		return
 	}
-	ce.Reply("Stories from %s are %s in this room", ghost.Intent.GetMXID(), state)
+	lines := []string{fmt.Sprintf("%s stories from %s are %s in this room", formatStoryPlatform(loginPlatform), ghostMXID, describe(settings.enabledFor(loginPlatform)))}
+	for platformStr, val := range settings.PlatformOverrides {
+		platform := types.PlatformFromString(platformStr)
+		if platform == loginPlatform {
+			continue
+		}
+		lines = append(lines, fmt.Sprintf("%s stories override: %s", formatStoryPlatform(platform), describe(val)))
+	}
+	ce.Reply(strings.Join(lines, "\n"))
+}
+
+func storyPlatformAllowed(loginPlatform, target types.Platform) bool {
+	if target.IsInstagram() {
+		return loginPlatform.IsInstagram()
+	}
+	if target.IsMessenger() {
+		return loginPlatform.IsMessenger()
+	}
+	return false
+}
+
+func formatStoryPlatform(platform types.Platform) string {
+	switch {
+	case platform.IsInstagram():
+		return "Instagram"
+	case platform.IsMessenger():
+		return "Messenger"
+	default:
+		return "Unknown"
+	}
 }

@@ -30,8 +30,71 @@ const storyMetadataKey = "fi.mau.meta.story"
 var storyBodyTemplate = "📖 Story from %s"
 
 type storySettingsContent struct {
-	ReceiveStories bool   `json:"receive_stories"`
-	GhostID        string `json:"ghost_id,omitempty"`
+	ReceiveStories    bool            `json:"receive_stories"`
+	GhostID           string          `json:"ghost_id,omitempty"`
+	PlatformOverrides map[string]bool `json:"platform_overrides,omitempty"`
+}
+
+func newStorySettingsContent(defaultEnabled bool) *storySettingsContent {
+	return &storySettingsContent{ReceiveStories: defaultEnabled}
+}
+
+func (c *storySettingsContent) clone() *storySettingsContent {
+	if c == nil {
+		return nil
+	}
+	clone := &storySettingsContent{
+		ReceiveStories: c.ReceiveStories,
+		GhostID:        c.GhostID,
+	}
+	if len(c.PlatformOverrides) > 0 {
+		clone.PlatformOverrides = make(map[string]bool, len(c.PlatformOverrides))
+		for k, v := range c.PlatformOverrides {
+			clone.PlatformOverrides[k] = v
+		}
+	}
+	return clone
+}
+
+func (c *storySettingsContent) enabledFor(platform types.Platform) bool {
+	if c == nil {
+		return false
+	}
+	if platform.IsValid() {
+		if val, ok := c.PlatformOverrides[platform.String()]; ok {
+			return val
+		}
+	}
+	return c.ReceiveStories
+}
+
+func (c *storySettingsContent) apply(platform types.Platform, applyToAll bool, enabled bool) {
+	if c == nil {
+		return
+	}
+	if applyToAll || !platform.IsValid() {
+		c.ReceiveStories = enabled
+		for key, val := range c.PlatformOverrides {
+			if val == enabled {
+				delete(c.PlatformOverrides, key)
+			}
+		}
+		if len(c.PlatformOverrides) == 0 {
+			c.PlatformOverrides = nil
+		}
+		return
+	}
+	if c.PlatformOverrides == nil {
+		c.PlatformOverrides = make(map[string]bool)
+	}
+	key := platform.String()
+	c.PlatformOverrides[key] = enabled
+	if c.PlatformOverrides[key] == c.ReceiveStories {
+		delete(c.PlatformOverrides, key)
+	}
+	if len(c.PlatformOverrides) == 0 {
+		c.PlatformOverrides = nil
+	}
 }
 
 type StoryPoller interface {
@@ -335,7 +398,7 @@ func (sp *InstagramStoryPoller) deliverStoryToPortal(ctx context.Context, dbPort
 	if portal == nil || portal.MXID == "" {
 		return false
 	}
-	enabled, err := sp.mc.Main.getStorySetting(ctx, portal, ghostMXID)
+	enabled, err := sp.mc.Main.getStorySetting(ctx, portal, ghostMXID, types.Instagram)
 	if err != nil {
 		sp.mc.UserLogin.Log.Err(err).
 			Object("portal_key", portal.PortalKey).
@@ -375,52 +438,75 @@ func buildStoryStateKey(id.UserID) string {
 	return ""
 }
 
-func (m *MetaConnector) getStorySetting(ctx context.Context, portal *bridgev2.Portal, ghostMXID id.UserID) (bool, error) {
+func (m *MetaConnector) getStorySetting(ctx context.Context, portal *bridgev2.Portal, ghostMXID id.UserID, platform types.Platform) (bool, error) {
+	content, err := m.getStorySettingsContent(ctx, portal, ghostMXID)
+	if err != nil {
+		return false, err
+	}
+	if content == nil {
+		return m.Config.Stories.DefaultEnabled, nil
+	}
+	return content.enabledFor(platform), nil
+}
+
+func (m *MetaConnector) getStorySettingsContent(ctx context.Context, portal *bridgev2.Portal, ghostMXID id.UserID) (*storySettingsContent, error) {
 	defaultEnabled := m.Config.Stories.DefaultEnabled
 	if portal.MXID == "" {
-		return defaultEnabled, nil
+		return newStorySettingsContent(defaultEnabled), nil
 	}
 	mx, ok := m.Bridge.Matrix.(bridgev2.MatrixConnectorWithArbitraryRoomState)
 	if !ok {
-		return false, fmt.Errorf("matrix connector does not support state lookups")
+		return nil, fmt.Errorf("matrix connector does not support state lookups")
 	}
 	evt, err := mx.GetStateEvent(ctx, portal.MXID, storySettingsEventType, buildStoryStateKey(ghostMXID))
 	if err != nil {
 		var respErr mautrix.RespError
 		if errors.As(err, &respErr) && respErr.ErrCode == "M_NOT_FOUND" {
-			return defaultEnabled, nil
+			return newStorySettingsContent(defaultEnabled), nil
 		}
-		return false, err
+		return nil, err
 	}
 	if evt == nil {
-		return defaultEnabled, nil
+		return newStorySettingsContent(defaultEnabled), nil
 	}
 	return decodeStorySetting(evt, defaultEnabled)
 }
 
-func decodeStorySetting(evt *event.Event, defaultEnabled bool) (bool, error) {
-	var content storySettingsContent
+func decodeStorySetting(evt *event.Event, defaultEnabled bool) (*storySettingsContent, error) {
+	content := newStorySettingsContent(defaultEnabled)
 	if evt.Content.VeryRaw != nil {
-		if err := json.Unmarshal(evt.Content.VeryRaw, &content); err == nil {
-			return content.ReceiveStories, nil
+		if err := json.Unmarshal(evt.Content.VeryRaw, content); err == nil {
+			if content.PlatformOverrides == nil {
+				content.PlatformOverrides = nil
+			}
+			return content, nil
 		}
 	}
 	if evt.Content.Raw != nil {
 		if val, ok := evt.Content.Raw["receive_stories"]; ok {
 			if enabled, ok := val.(bool); ok {
-				return enabled, nil
+				content.ReceiveStories = enabled
 			}
 		}
 	}
-	return defaultEnabled, nil
+	return content, nil
 }
 
-func (m *MetaConnector) setStorySetting(ctx context.Context, portal *bridgev2.Portal, ghostMXID id.UserID, enabled bool) error {
+func (m *MetaConnector) setStorySetting(ctx context.Context, portal *bridgev2.Portal, ghostMXID id.UserID, platform types.Platform, applyToAll bool, enabled bool) error {
 	if portal.MXID == "" {
 		return fmt.Errorf("room does not have a Matrix ID yet")
 	}
-	content := &event.Content{Parsed: &storySettingsContent{ReceiveStories: enabled, GhostID: string(ghostMXID)}}
-	_, err := m.Bridge.Bot.SendState(ctx, portal.MXID, storySettingsEventType, buildStoryStateKey(ghostMXID), content, time.Time{})
+	content, err := m.getStorySettingsContent(ctx, portal, ghostMXID)
+	if err != nil {
+		return err
+	}
+	if content == nil {
+		content = newStorySettingsContent(m.Config.Stories.DefaultEnabled)
+	}
+	content.apply(platform, applyToAll, enabled)
+	content.GhostID = string(ghostMXID)
+	state := &event.Content{Parsed: content}
+	_, err = m.Bridge.Bot.SendState(ctx, portal.MXID, storySettingsEventType, buildStoryStateKey(ghostMXID), state, time.Time{})
 	return err
 }
 
