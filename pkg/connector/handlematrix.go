@@ -78,6 +78,10 @@ func (m *MetaClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Matr
 	portalMeta := msg.Portal.Metadata.(*metaid.PortalMetadata)
 	otid := getOTID(msg.InputTransactionID)
 
+	if resp, handled, err := m.tryMessengerStoryReply(ctx, msg); handled {
+		return resp, err
+	}
+
 	switch portalMeta.ThreadType {
 	case table.ENCRYPTED_OVER_WA_ONE_TO_ONE, table.ENCRYPTED_OVER_WA_GROUP:
 		if !m.e2eeConnectWaiter.WaitTimeout(ConnectWaitTimeout) {
@@ -109,10 +113,6 @@ func (m *MetaClient) HandleMatrixMessage(ctx context.Context, msg *bridgev2.Matr
 	default:
 		if !m.connectWaiter.WaitTimeout(ConnectWaitTimeout) {
 			return nil, ErrNotConnected
-		}
-
-		if resp, handled, err := m.tryMessengerStoryReply(ctx, msg); handled {
-			return resp, err
 		}
 
 		if resp, handled, err := m.tryInstagramStoryReply(ctx, msg); handled {
