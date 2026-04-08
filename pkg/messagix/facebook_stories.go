@@ -1,6 +1,7 @@
 package messagix
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -102,8 +103,9 @@ func (fb *FacebookMethods) FetchStoryBuckets(ctx context.Context, bucketIDs []st
 	if err != nil {
 		return nil, err
 	}
+	dec := json.NewDecoder(bytes.NewReader(data))
 	var resp responses.FBStoriesBucketResponse
-	if err := json.Unmarshal(data, &resp); err != nil {
+	if err := dec.Decode(&resp); err != nil {
 		return nil, fmt.Errorf("failed to decode story bucket response: %w", err)
 	}
 	return &resp, nil
