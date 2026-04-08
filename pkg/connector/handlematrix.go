@@ -728,6 +728,7 @@ func (m *MetaClient) tryMessengerStoryReply(ctx context.Context, msg *bridgev2.M
 	input := &messagix.FacebookStoryReplyInput{
 		Message:          msg.Content.Body,
 		StoryID:          story.StoryID,
+		StoryReelID:      story.ReelID,
 		StoryReplyType:   "TEXT",
 		ActorID:          actorID,
 		ClientMutationID: strconv.FormatInt(otid, 10),
