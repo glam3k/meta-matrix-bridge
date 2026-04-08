@@ -19,6 +19,7 @@ package msgconv
 import (
 	"context"
 	"fmt"
+	"strconv"
 
 	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/bridgev2/networkid"
@@ -118,4 +119,76 @@ func pickLargestVideo(versions []responses.VideoVersions) (string, int, int) {
 		}
 	}
 	return url, width, height
+}
+
+func (mc *MessageConverter) MessengerStoryItemToMatrix(
+	ctx context.Context,
+	portal *bridgev2.Portal,
+	intent bridgev2.MatrixAPI,
+	messageID networkid.MessageID,
+	item *responses.FBStoryNode,
+	bucketID string,
+) (*bridgev2.ConvertedMessagePart, error) {
+	if item == nil {
+		return nil, fmt.Errorf("story item missing")
+	}
+	if len(item.Attachments) == 0 {
+		return nil, fmt.Errorf("story attachment missing")
+	}
+	media := item.Attachments[0].Media
+	ctx = context.WithValue(ctx, contextKeyPortal, portal)
+	ctx = context.WithValue(ctx, contextKeyIntent, intent)
+	ctx = context.WithValue(ctx, contextKeyMsgID, messageID)
+	ctx = context.WithValue(ctx, contextKeyPartID, networkid.PartID("story"))
+
+	refresh := &MediaRefreshMeta{
+		StoryMediaID: item.ID,
+		StoryReelID:  bucketID,
+	}
+	if expStr := item.StoryCardInfo.ReplyThreadExpirationTime; expStr != "" {
+		if exp, err := strconv.ParseInt(expStr, 10, 64); err == nil {
+			refresh.ExpiresAt = exp * 1000
+		}
+	}
+
+	var (
+		attachmentType table.AttachmentType
+		url            string
+		mime           string
+		width          int
+		height         int
+		duration       int
+	)
+	if media.Typename == "Video" {
+		attachmentType = table.AttachmentTypeVideo
+		url = media.PlayableURL
+		if url == "" && len(media.ProgressiveURLs) > 0 {
+			url = media.ProgressiveURLs[0].ProgressiveURL
+		}
+		mime = "video/mp4"
+		if media.Image != nil {
+			width = media.Image.Width
+			height = media.Image.Height
+		}
+		if media.PlayableDurationMS > 0 {
+			duration = int(media.PlayableDurationMS)
+		}
+	} else {
+		attachmentType = table.AttachmentTypeImage
+		if media.Image != nil {
+			url = media.Image.URI
+			width = media.Image.Width
+			height = media.Image.Height
+		}
+		mime = "image/jpeg"
+	}
+	if url == "" {
+		return nil, fmt.Errorf("story media URL missing")
+	}
+	fileName := fmt.Sprintf("story_%s", item.ID)
+	converted, err := mc.reuploadAttachment(ctx, attachmentType, url, fileName, mime, 0, width, height, duration, refresh)
+	if err != nil {
+		return nil, err
+	}
+	return converted, nil
 }

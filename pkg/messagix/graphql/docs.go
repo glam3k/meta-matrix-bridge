@@ -46,6 +46,16 @@ var GraphQLDocs = map[string]GraphQLDoc{
 		CallerClass:  "RelayModern",
 		FriendlyName: "IGDirectRemoveThreadImageMutation",
 	},
+	"FBStoriesTray": {
+		DocId:        "26128182406837651",
+		CallerClass:  "RelayModern",
+		FriendlyName: "useStoriesViewerBucketsPaginationQuery",
+	},
+	"FBStoriesViewer": {
+		DocId:        "26473024232338199",
+		CallerClass:  "RelayModern",
+		FriendlyName: "StoriesViewerBucketPrefetcherMultiBucketsQuery",
+	},
 }
 
 type IGDeleteThreadGraphQLRequestPayload struct {

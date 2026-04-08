@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strconv"
 	"sync/atomic"
 	"time"
 
@@ -278,18 +279,27 @@ func (sp *InstagramStoryPoller) processTrayEntry(ctx context.Context, reel respo
 	return stats
 }
 
-func makeStoryMessageID(loginID networkid.UserLoginID, igUserID, storyID string) networkid.MessageID {
-	if loginID == "" || igUserID == "" || storyID == "" {
+func makeStoryMessageID(platform types.Platform, loginID networkid.UserLoginID, ownerID, storyID string) networkid.MessageID {
+	if loginID == "" || ownerID == "" || storyID == "" {
 		return ""
 	}
-	return networkid.MessageID(fmt.Sprintf("story:%s:%s:%s", loginID, igUserID, storyID))
+	var prefix string
+	switch {
+	case platform.IsInstagram():
+		prefix = "ig"
+	case platform.IsMessenger():
+		prefix = "fb"
+	default:
+		prefix = "unknown"
+	}
+	return networkid.MessageID(fmt.Sprintf("story:%s:%s:%s:%s", prefix, loginID, ownerID, storyID))
 }
 
 func (sp *InstagramStoryPoller) bridgeStory(ctx context.Context, reel responses.ReelInfo, item *responses.ReelItem) (bool, string) {
 	if sp == nil || sp.mc == nil || sp.mc.Main == nil || sp.mc.Main.Bridge == nil || item == nil || reel.User == nil {
 		return false, "missing_context"
 	}
-	storyMsgID := makeStoryMessageID(sp.mc.UserLogin.ID, reel.User.Pk, item.Pk)
+	storyMsgID := makeStoryMessageID(types.Instagram, sp.mc.UserLogin.ID, reel.User.Pk, item.Pk)
 	if storyMsgID == "" {
 		return false, "missing_story_id"
 	}
@@ -428,6 +438,102 @@ func (sp *InstagramStoryPoller) deliverStoryToPortal(ctx context.Context, dbPort
 		storyURL:           fmt.Sprintf("https://www.instagram.com/stories/%s/%s/", reel.User.Username, item.Pk),
 		messageID:          messageID,
 		timestamp:          time.Unix(int64(item.TakenAt), 0),
+	}
+	sp.mc.UserLogin.QueueRemoteEvent(evt)
+	return true
+}
+
+func (sp *MessengerStoryPoller) bridgeStory(ctx context.Context, bucket responses.FBStoriesBucketNode, story responses.FBStoryNode) (bool, string) {
+	if sp == nil || sp.mc == nil || sp.mc.Main == nil || sp.mc.Main.Bridge == nil {
+		return false, "missing_context"
+	}
+	ownerID := bucket.StoryBucketOwner.ID
+	storyMsgID := makeStoryMessageID(types.Messenger, sp.mc.UserLogin.ID, ownerID, story.ID)
+	if storyMsgID == "" {
+		return false, "missing_story_id"
+	}
+	if existing, err := sp.mc.Main.Bridge.DB.Message.GetFirstPartByID(ctx, sp.mc.UserLogin.ID, storyMsgID); err != nil {
+		sp.mc.UserLogin.Log.Err(err).
+			Str("story_id", story.ID).
+			Msg("Failed to check if Messenger story was already bridged")
+		return false, "db_error"
+	} else if existing != nil {
+		return false, "already_bridged"
+	}
+	ghostMXID, dbPortal := sp.lookupMessengerStoryPortal(ctx, ownerID)
+	if dbPortal == nil || ghostMXID == "" {
+		return false, "no_portal"
+	}
+	if !sp.deliverMessengerStory(ctx, dbPortal, ghostMXID, bucket, story, storyMsgID) {
+		return false, "deliver_failed"
+	}
+	return true, ""
+}
+
+func (sp *MessengerStoryPoller) lookupMessengerStoryPortal(ctx context.Context, ownerID string) (id.UserID, *database.Portal) {
+	if ownerID == "" {
+		return "", nil
+	}
+	ghostID := networkid.UserID(ownerID)
+	dbPortal, err := sp.mc.Main.Bridge.DB.Portal.GetDM(ctx, sp.mc.UserLogin.ID, ghostID)
+	if err != nil || dbPortal == nil {
+		if err != nil {
+			sp.mc.UserLogin.Log.Debug().
+				Err(err).
+				Str("fb_user_id", ownerID).
+				Msg("Failed to load portal for Messenger story")
+		}
+		return "", nil
+	}
+	ghost, err := sp.mc.Main.Bridge.GetGhostByID(ctx, ghostID)
+	if err != nil || ghost == nil || ghost.Intent == nil {
+		if err != nil {
+			sp.mc.UserLogin.Log.Err(err).
+				Str("fb_user_id", ownerID).
+				Msg("Failed to load ghost for Messenger story")
+		}
+		return "", nil
+	}
+	return ghost.Intent.GetMXID(), dbPortal
+}
+
+func (sp *MessengerStoryPoller) deliverMessengerStory(ctx context.Context, dbPortal *database.Portal, ghostMXID id.UserID, bucket responses.FBStoriesBucketNode, story responses.FBStoryNode, messageID networkid.MessageID) bool {
+	portal, err := sp.mc.Main.Bridge.GetPortalByKey(ctx, dbPortal.PortalKey)
+	if err != nil {
+		sp.mc.UserLogin.Log.Err(err).
+			Object("portal_key", dbPortal.PortalKey).
+			Msg("Failed to load portal for Messenger story delivery")
+		return false
+	}
+	if portal == nil || portal.MXID == "" {
+		return false
+	}
+	enabled, err := sp.mc.Main.getStorySetting(ctx, portal, ghostMXID, types.Messenger)
+	if err != nil {
+		sp.mc.UserLogin.Log.Err(err).
+			Object("portal_key", portal.PortalKey).
+			Msg("Failed to get Messenger story settings")
+		return false
+	}
+	if !enabled {
+		return false
+	}
+	storyURL := story.Url
+	if storyURL == "" && story.StoryCardInfo.PermalinkInfo != nil {
+		storyURL = story.StoryCardInfo.PermalinkInfo.URI
+	}
+	storyCopy := story
+	evt := &MessengerStoryEvent{
+		mc:          sp.mc,
+		portalKey:   portal.PortalKey,
+		sender:      networkid.UserID(bucket.StoryBucketOwner.ID),
+		senderLogin: sp.mc.UserLogin.ID,
+		storyItem:   &storyCopy,
+		bucketID:    bucket.ID,
+		ownerName:   bucket.StoryBucketOwner.Name,
+		storyURL:    storyURL,
+		messageID:   messageID,
+		timestamp:   time.Unix(story.CreationTime, 0),
 	}
 	sp.mc.UserLogin.QueueRemoteEvent(evt)
 	return true
@@ -620,8 +726,111 @@ func (evt *InstagramStoryEvent) GetStreamOrder() int64 {
 	return evt.timestamp.UnixMilli()
 }
 
+type MessengerStoryEvent struct {
+	mc          *MetaClient
+	portalKey   networkid.PortalKey
+	sender      networkid.UserID
+	senderLogin networkid.UserLoginID
+	storyItem   *responses.FBStoryNode
+	bucketID    string
+	ownerName   string
+	storyURL    string
+	messageID   networkid.MessageID
+	timestamp   time.Time
+}
+
+func (evt *MessengerStoryEvent) GetType() bridgev2.RemoteEventType {
+	return bridgev2.RemoteEventMessage
+}
+
+func (evt *MessengerStoryEvent) GetPortalKey() networkid.PortalKey {
+	return evt.portalKey
+}
+
+func (evt *MessengerStoryEvent) AddLogContext(c zerolog.Context) zerolog.Context {
+	return c.
+		Stringer("portal_key", evt.portalKey).
+		Str("story_id", string(evt.messageID)).
+		Str("story_user", evt.ownerName)
+}
+
+func (evt *MessengerStoryEvent) GetSender() bridgev2.EventSender {
+	return bridgev2.EventSender{
+		Sender:      evt.sender,
+		SenderLogin: evt.senderLogin,
+		ForceDMUser: true,
+	}
+}
+
+func (evt *MessengerStoryEvent) GetID() networkid.MessageID {
+	return evt.messageID
+}
+
+func (evt *MessengerStoryEvent) ConvertMessage(ctx context.Context, portal *bridgev2.Portal, intent bridgev2.MatrixAPI) (*bridgev2.ConvertedMessage, error) {
+	if evt.mc == nil || evt.mc.Main == nil || evt.mc.Main.MsgConv == nil {
+		return nil, fmt.Errorf("message converter unavailable")
+	}
+	if evt.storyItem == nil {
+		return nil, fmt.Errorf("story data missing")
+	}
+	part, err := evt.mc.Main.MsgConv.MessengerStoryItemToMatrix(ctx, portal, intent, evt.messageID, evt.storyItem, evt.bucketID)
+	if err != nil {
+		return nil, err
+	}
+	if part.Content != nil {
+		part.Content.Body = fmt.Sprintf(storyBodyTemplate, evt.ownerName)
+	}
+	if part.Extra == nil {
+		part.Extra = make(map[string]any)
+	}
+	postedAt := evt.timestamp.UnixMilli()
+	expiresAt := postedAt
+	if expStr := evt.storyItem.StoryCardInfo.ReplyThreadExpirationTime; expStr != "" {
+		if exp, err := strconv.ParseInt(expStr, 10, 64); err == nil {
+			expiresAt = exp * 1000
+		}
+	}
+	metadata := map[string]any{
+		"source_platform": types.Messenger.String(),
+		"source_story_id": evt.storyItem.ID,
+		"posted_at":       postedAt,
+		"expires_at":      expiresAt,
+	}
+	if evt.storyItem.StoryCardInfo.StoryPlayDuration > 0 {
+		metadata["duration_ms"] = int(evt.storyItem.StoryCardInfo.StoryPlayDuration * 1000)
+	}
+	part.Extra[storyMetadataKey] = metadata
+	meta, _ := part.DBMetadata.(*metaid.MessageMetadata)
+	if meta == nil {
+		meta = &metaid.MessageMetadata{}
+		part.DBMetadata = meta
+	}
+	meta.Story = &metaid.StoryMetadata{
+		Platform:  types.Messenger.String(),
+		StoryID:   evt.storyItem.ID,
+		ReelID:    evt.bucketID,
+		AuthorID:  string(evt.sender),
+		PostedAt:  postedAt,
+		ExpiresAt: expiresAt,
+		CanReply:  ptr.Ptr(evt.storyItem.StoryCardInfo.CanViewerTextReply),
+	}
+	if evt.storyURL != "" {
+		part.Extra["external_url"] = evt.storyURL
+	}
+	return &bridgev2.ConvertedMessage{Parts: []*bridgev2.ConvertedMessagePart{part}}, nil
+}
+
+func (evt *MessengerStoryEvent) GetTimestamp() time.Time {
+	return evt.timestamp
+}
+
+func (evt *MessengerStoryEvent) GetStreamOrder() int64 {
+	return evt.timestamp.UnixMilli()
+}
+
 type MessengerStoryPoller struct {
 	mc      *MetaClient
+	cancel  context.CancelFunc
 	running atomic.Bool
 }
 
@@ -640,13 +849,110 @@ func (sp *MessengerStoryPoller) Start(ctx context.Context) {
 	if sp.running.Swap(true) {
 		return
 	}
-	sp.mc.UserLogin.Log.Info().Msg("Messenger story poller stubbed; functionality not yet implemented")
+	ctx, cancel := context.WithCancel(ctx)
+	sp.cancel = cancel
+	go sp.loop(ctx)
 }
 
 func (sp *MessengerStoryPoller) Stop() {
-	if sp.running.Swap(false) && sp.mc != nil {
-		sp.mc.UserLogin.Log.Trace().Msg("Messenger story poller stopped")
+	if cancel := sp.cancel; cancel != nil {
+		cancel()
 	}
+}
+
+func (sp *MessengerStoryPoller) loop(ctx context.Context) {
+	defer sp.running.Store(false)
+	interval := sp.mc.Main.Config.Stories.PollInterval
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	sp.poll(ctx)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			sp.poll(ctx)
+		}
+	}
+}
+
+func (sp *MessengerStoryPoller) poll(ctx context.Context) {
+	cli := sp.mc.Client
+	if cli == nil || cli.Facebook == nil {
+		return
+	}
+	sp.mc.UserLogin.Log.Debug().Msg("Polling Messenger stories")
+	var cursor *string
+	stats := storyProcessStats{}
+	for {
+		tray, err := cli.Facebook.FetchStoriesTray(ctx, cursor)
+		if err != nil {
+			sp.mc.UserLogin.Log.Err(err).Msg("Failed to fetch Messenger story tray")
+			return
+		}
+		if tray == nil || tray.Data.Node.UnifiedStoriesBuckets.Edges == nil {
+			break
+		}
+		for _, edge := range tray.Data.Node.UnifiedStoriesBuckets.Edges {
+			bucketStats := sp.processBucket(ctx, edge)
+			stats.total += bucketStats.total
+			stats.delivered += bucketStats.delivered
+			stats.skipped += bucketStats.skipped
+		}
+		if !tray.Data.Node.UnifiedStoriesBuckets.PageInfo.HasNextPage {
+			break
+		}
+		next := tray.Data.Node.UnifiedStoriesBuckets.PageInfo.EndCursor
+		cursor = &next
+	}
+	sp.mc.UserLogin.Log.Info().
+		Int("stories_checked", stats.total).
+		Int("stories_delivered", stats.delivered).
+		Int("stories_skipped", stats.skipped).
+		Msg("Messenger story poll completed")
+}
+
+func (sp *MessengerStoryPoller) processBucket(ctx context.Context, edge responses.FBStoryBucketEdge) storyProcessStats {
+	stats := storyProcessStats{}
+	cli := sp.mc.Client
+	if cli == nil || cli.Facebook == nil {
+		return stats
+	}
+	resp, err := cli.Facebook.FetchStoryBuckets(ctx, []string{edge.Node.ID})
+	if err != nil {
+		sp.mc.UserLogin.Log.Err(err).
+			Str("bucket_id", edge.Node.ID).
+			Msg("Failed to fetch Messenger story bucket")
+		return stats
+	}
+	if resp == nil || len(resp.Data.Nodes) == 0 {
+		return stats
+	}
+	bucket := resp.Data.Nodes[0]
+	items := bucket.UnifiedStoriesWithNotes.Edges
+	sort.SliceStable(items, func(i, j int) bool {
+		return items[i].Node.CreationTime < items[j].Node.CreationTime
+	})
+	for _, storyEdge := range items {
+		stats.total++
+		if storyEdge.Node.ID == "" {
+			stats.skipped++
+			continue
+		}
+		if delivered, reason := sp.bridgeStory(ctx, bucket, storyEdge.Node); delivered {
+			stats.delivered++
+		} else {
+			stats.skipped++
+			if reason != "" {
+				sp.mc.UserLogin.Log.Debug().
+					Str("fb_user_id", bucket.StoryBucketOwner.ID).
+					Str("story_id", storyEdge.Node.ID).
+					Str("reason", reason).
+					Msg("Skipping Messenger story")
+			}
+		}
+	}
+	return stats
 }
 
 // ... (rest of file continues with InstagramStoryEvent definition)
