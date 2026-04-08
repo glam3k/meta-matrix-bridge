@@ -56,7 +56,7 @@ type MetaClient struct {
 	e2eeConnectWaiter     *exsync.Event
 	firstE2EEConnectDone  bool
 
-	storyPoller *InstagramStoryPoller
+	storyPollers *StoryPollerManager
 
 	lastStateSave     time.Time
 	lastStateSaveLock sync.Mutex
@@ -158,19 +158,33 @@ func (m *MetaClient) ensureMessagixClient() {
 	}
 }
 
-func (m *MetaClient) startStoryPoller(ctx context.Context) {
-	if !m.Main.Config.Stories.Enabled || !m.LoginMeta.Platform.IsInstagram() {
+func (m *MetaClient) ensureStoryPollers() {
+	if m.storyPollers != nil {
 		return
 	}
-	if m.storyPoller == nil {
-		m.storyPoller = NewInstagramStoryPoller(m)
+	manager := NewStoryPollerManager()
+	if m.LoginMeta.Platform.IsInstagram() {
+		manager.Add(NewInstagramStoryPoller(m))
 	}
-	m.storyPoller.Start(ctx)
+	if m.LoginMeta.Platform.IsMessenger() {
+		manager.Add(NewMessengerStoryPoller(m))
+	}
+	m.storyPollers = manager
 }
 
-func (m *MetaClient) stopStoryPoller() {
-	if m.storyPoller != nil {
-		m.storyPoller.Stop()
+func (m *MetaClient) startStoryPollers(ctx context.Context) {
+	if !m.Main.Config.Stories.Enabled {
+		return
+	}
+	m.ensureStoryPollers()
+	if m.storyPollers != nil {
+		m.storyPollers.Start(ctx)
+	}
+}
+
+func (m *MetaClient) stopStoryPollers() {
+	if m.storyPollers != nil {
+		m.storyPollers.Stop()
 	}
 }
 
@@ -583,7 +597,7 @@ func (m *MetaClient) disconnect(dumpState bool) (state json.RawMessage) {
 	if stopPeriodicReconnect := m.stopPeriodicReconnect.Swap(nil); stopPeriodicReconnect != nil {
 		(*stopPeriodicReconnect)()
 	}
-	m.stopStoryPoller()
+	m.stopStoryPollers()
 	return
 }
 

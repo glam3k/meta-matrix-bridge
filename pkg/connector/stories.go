@@ -34,6 +34,39 @@ type storySettingsContent struct {
 	GhostID        string `json:"ghost_id,omitempty"`
 }
 
+type StoryPoller interface {
+	Start(ctx context.Context)
+	Stop()
+	Platform() types.Platform
+}
+
+type StoryPollerManager struct {
+	pollers []StoryPoller
+}
+
+func NewStoryPollerManager() *StoryPollerManager {
+	return &StoryPollerManager{}
+}
+
+func (pm *StoryPollerManager) Add(p StoryPoller) {
+	if p == nil {
+		return
+	}
+	pm.pollers = append(pm.pollers, p)
+}
+
+func (pm *StoryPollerManager) Start(ctx context.Context) {
+	for _, poller := range pm.pollers {
+		poller.Start(ctx)
+	}
+}
+
+func (pm *StoryPollerManager) Stop() {
+	for _, poller := range pm.pollers {
+		poller.Stop()
+	}
+}
+
 type InstagramStoryPoller struct {
 	mc      *MetaClient
 	cancel  context.CancelFunc
@@ -48,6 +81,10 @@ type storyProcessStats struct {
 
 func NewInstagramStoryPoller(mc *MetaClient) *InstagramStoryPoller {
 	return &InstagramStoryPoller{mc: mc}
+}
+
+func (sp *InstagramStoryPoller) Platform() types.Platform {
+	return types.Instagram
 }
 
 func (sp *InstagramStoryPoller) Start(ctx context.Context) {
@@ -495,6 +532,35 @@ func (evt *InstagramStoryEvent) GetTimestamp() time.Time {
 
 func (evt *InstagramStoryEvent) GetStreamOrder() int64 {
 	return evt.timestamp.UnixMilli()
+}
+
+type MessengerStoryPoller struct {
+	mc      *MetaClient
+	running atomic.Bool
+}
+
+func NewMessengerStoryPoller(mc *MetaClient) *MessengerStoryPoller {
+	return &MessengerStoryPoller{mc: mc}
+}
+
+func (sp *MessengerStoryPoller) Platform() types.Platform {
+	return types.Messenger
+}
+
+func (sp *MessengerStoryPoller) Start(ctx context.Context) {
+	if sp.mc == nil || !sp.mc.Main.Config.Stories.Enabled || !sp.mc.LoginMeta.Platform.IsMessenger() {
+		return
+	}
+	if sp.running.Swap(true) {
+		return
+	}
+	sp.mc.UserLogin.Log.Info().Msg("Messenger story poller stubbed; functionality not yet implemented")
+}
+
+func (sp *MessengerStoryPoller) Stop() {
+	if sp.running.Swap(false) && sp.mc != nil {
+		sp.mc.UserLogin.Log.Trace().Msg("Messenger story poller stopped")
+	}
 }
 
 // ... (rest of file continues with InstagramStoryEvent definition)
