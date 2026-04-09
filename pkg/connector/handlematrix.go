@@ -765,10 +765,10 @@ func (m *MetaClient) tryMessengerStoryReply(ctx context.Context, msg *bridgev2.M
 }
 
 func buildMessengerStoryURL(authorID, storyID string) string {
-	if authorID == "" || storyID == "" {
+	if storyID == "" {
 		return ""
 	}
-	return fmt.Sprintf("https://www.facebook.com/stories/%s/%s/", authorID, storyID)
+	return fmt.Sprintf("https://www.facebook.com/stories/%s/", storyID)
 }
 
 func (m *MetaClient) tryInstagramStoryReply(ctx context.Context, msg *bridgev2.MatrixMessage) (*bridgev2.MatrixMessageResponse, bool, error) {
