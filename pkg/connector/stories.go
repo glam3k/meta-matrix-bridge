@@ -2,11 +2,14 @@ package connector
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
 	"strconv"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -539,6 +542,119 @@ func (sp *MessengerStoryPoller) deliverMessengerStory(ctx context.Context, dbPor
 	return true
 }
 
+func (sp *MessengerStoryPoller) pruneMessengerStoryCache() {
+	sp.cacheMu.Lock()
+	defer sp.cacheMu.Unlock()
+	now := time.Now()
+	for storyID, expiry := range sp.seenStories {
+		if !expiry.IsZero() && now.After(expiry) {
+			delete(sp.seenStories, storyID)
+		}
+	}
+	for bucketID, state := range sp.bucketCache {
+		if !state.expiresAt.IsZero() && now.After(state.expiresAt) {
+			delete(sp.bucketCache, bucketID)
+		}
+	}
+}
+
+func (sp *MessengerStoryPoller) storyExpiration(story responses.FBStoryNode) time.Time {
+	if story.StoryCardInfo.ReplyThreadExpirationTime != "" {
+		if exp, err := strconv.ParseInt(story.StoryCardInfo.ReplyThreadExpirationTime, 10, 64); err == nil && exp > 0 {
+			return time.Unix(exp, 0)
+		}
+		if parsed, err := time.Parse(time.RFC3339, story.StoryCardInfo.ReplyThreadExpirationTime); err == nil {
+			return parsed
+		}
+	}
+	created := time.Unix(story.CreationTime, 0)
+	return created.Add(messengerStoryLifetime)
+}
+
+func (sp *MessengerStoryPoller) markStorySeen(story responses.FBStoryNode) {
+	if story.ID == "" {
+		return
+	}
+	expiry := sp.storyExpiration(story)
+	sp.cacheMu.Lock()
+	defer sp.cacheMu.Unlock()
+	sp.seenStories[story.ID] = expiry
+}
+
+func (sp *MessengerStoryPoller) isStorySeen(storyID string) bool {
+	if storyID == "" {
+		return false
+	}
+	sp.cacheMu.Lock()
+	defer sp.cacheMu.Unlock()
+	expiry, ok := sp.seenStories[storyID]
+	if !ok {
+		return false
+	}
+	if !expiry.IsZero() && time.Now().After(expiry) {
+		delete(sp.seenStories, storyID)
+		return false
+	}
+	return true
+}
+
+func (sp *MessengerStoryPoller) markBucketSeen(bucketID string, cursorTS int64, expiry time.Time) {
+	if bucketID == "" || cursorTS == 0 {
+		return
+	}
+	if expiry.IsZero() {
+		expiry = time.Unix(cursorTS, 0).Add(messengerStoryLifetime)
+	}
+	sp.cacheMu.Lock()
+	defer sp.cacheMu.Unlock()
+	state := sp.bucketCache[bucketID]
+	if cursorTS > state.latestTimestamp {
+		state.latestTimestamp = cursorTS
+	}
+	if state.expiresAt.IsZero() || expiry.After(state.expiresAt) {
+		state.expiresAt = expiry
+	}
+	sp.bucketCache[bucketID] = state
+}
+
+func (sp *MessengerStoryPoller) shouldSkipBucket(bucketID string, cursorTS int64) bool {
+	if bucketID == "" || cursorTS == 0 {
+		return false
+	}
+	sp.cacheMu.Lock()
+	defer sp.cacheMu.Unlock()
+	state, ok := sp.bucketCache[bucketID]
+	if !ok {
+		return false
+	}
+	if !state.expiresAt.IsZero() && time.Now().After(state.expiresAt) {
+		delete(sp.bucketCache, bucketID)
+		return false
+	}
+	return state.latestTimestamp >= cursorTS
+}
+
+func (sp *MessengerStoryPoller) extractBucketCursorTimestamp(cursor string) int64 {
+	if cursor == "" {
+		return 0
+	}
+	decoded, err := base64.StdEncoding.DecodeString(cursor)
+	if err != nil {
+		return 0
+	}
+	parts := strings.Split(strings.TrimSpace(string(decoded)), ":")
+	for i := len(parts) - 1; i >= 0; i-- {
+		part := strings.TrimSpace(parts[i])
+		if part == "" {
+			continue
+		}
+		if ts, err := strconv.ParseInt(part, 10, 64); err == nil && ts > 1000000000 {
+			return ts
+		}
+	}
+	return 0
+}
+
 func buildStoryStateKey(id.UserID) string {
 	// Room-wide toggle: Matrix treats user-like state keys as user-owned, so leave it blank.
 	return ""
@@ -832,10 +948,25 @@ type MessengerStoryPoller struct {
 	mc      *MetaClient
 	cancel  context.CancelFunc
 	running atomic.Bool
+
+	cacheMu     sync.Mutex
+	seenStories map[string]time.Time
+	bucketCache map[string]messengerBucketState
+}
+
+const messengerStoryLifetime = 25 * time.Hour
+
+type messengerBucketState struct {
+	latestTimestamp int64
+	expiresAt       time.Time
 }
 
 func NewMessengerStoryPoller(mc *MetaClient) *MessengerStoryPoller {
-	return &MessengerStoryPoller{mc: mc}
+	return &MessengerStoryPoller{
+		mc:          mc,
+		seenStories: make(map[string]time.Time),
+		bucketCache: make(map[string]messengerBucketState),
+	}
 }
 
 func (sp *MessengerStoryPoller) Platform() types.Platform {
@@ -881,6 +1012,7 @@ func (sp *MessengerStoryPoller) poll(ctx context.Context) {
 	if cli == nil || cli.Facebook == nil {
 		return
 	}
+	sp.pruneMessengerStoryCache()
 	sp.mc.UserLogin.Log.Debug().Msg("Polling Messenger stories")
 	var cursor *string
 	stats := storyProcessStats{}
@@ -918,6 +1050,13 @@ func (sp *MessengerStoryPoller) processBucket(ctx context.Context, edge response
 	if cli == nil || cli.Facebook == nil {
 		return stats
 	}
+	bucketCursorTS := sp.extractBucketCursorTimestamp(edge.Cursor)
+	if sp.shouldSkipBucket(edge.Node.ID, bucketCursorTS) {
+		sp.mc.UserLogin.Log.Debug().
+			Str("bucket_id", edge.Node.ID).
+			Msg("Skipping Messenger story bucket without changes")
+		return stats
+	}
 	resp, err := cli.Facebook.FetchStoryBuckets(ctx, []string{edge.Node.ID})
 	if err != nil {
 		sp.mc.UserLogin.Log.Err(err).
@@ -933,14 +1072,25 @@ func (sp *MessengerStoryPoller) processBucket(ctx context.Context, edge response
 	sort.SliceStable(items, func(i, j int) bool {
 		return items[i].Node.CreationTime < items[j].Node.CreationTime
 	})
+	allStoriesSeen := true
+	var latestExpiry time.Time
 	for _, storyEdge := range items {
 		stats.total++
 		if storyEdge.Node.ID == "" {
 			stats.skipped++
 			continue
 		}
+		expiry := sp.storyExpiration(storyEdge.Node)
+		if expiry.After(latestExpiry) {
+			latestExpiry = expiry
+		}
+		if sp.isStorySeen(storyEdge.Node.ID) {
+			stats.skipped++
+			continue
+		}
 		if delivered, reason := sp.bridgeStory(ctx, bucket, storyEdge.Node); delivered {
 			stats.delivered++
+			sp.markStorySeen(storyEdge.Node)
 		} else {
 			stats.skipped++
 			if reason != "" {
@@ -950,7 +1100,11 @@ func (sp *MessengerStoryPoller) processBucket(ctx context.Context, edge response
 					Str("reason", reason).
 					Msg("Skipping Messenger story")
 			}
+			allStoriesSeen = false
 		}
+	}
+	if allStoriesSeen {
+		sp.markBucketSeen(bucket.ID, bucketCursorTS, latestExpiry)
 	}
 	return stats
 }
