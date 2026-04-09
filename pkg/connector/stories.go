@@ -177,7 +177,9 @@ func (sp *InstagramStoryPoller) loop(ctx context.Context) {
 	interval := sp.mc.Main.Config.Stories.PollInterval
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
-	sp.poll(ctx)
+	if !sp.mc.Main.Config.Stories.SkipPollOnStart {
+		sp.poll(ctx)
+	}
 	for {
 		select {
 		case <-ctx.Done():
@@ -996,7 +998,9 @@ func (sp *MessengerStoryPoller) loop(ctx context.Context) {
 	interval := sp.mc.Main.Config.Stories.PollInterval
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
-	sp.poll(ctx)
+	if !sp.mc.Main.Config.Stories.SkipPollOnStart {
+		sp.poll(ctx)
+	}
 	for {
 		select {
 		case <-ctx.Done():

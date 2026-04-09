@@ -74,3 +74,5 @@ stories:
     token: ""
     # HTTP timeout when calling the helper.
     timeout: 10s
+  # When true, story pollers wait until the first interval elapses before polling.
+  skip_poll_on_start: false

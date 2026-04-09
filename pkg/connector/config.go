@@ -58,10 +58,11 @@ type ThreadBackfillConfig struct {
 }
 
 type StoriesConfig struct {
-	Enabled        bool          `yaml:"enabled"`
-	DefaultEnabled bool          `yaml:"default_enabled"`
-	PollInterval   time.Duration `yaml:"poll_interval"`
-	Helper         StoryHelperConfig `yaml:"helper"`
+	Enabled         bool              `yaml:"enabled"`
+	DefaultEnabled  bool              `yaml:"default_enabled"`
+	PollInterval    time.Duration     `yaml:"poll_interval"`
+	Helper          StoryHelperConfig `yaml:"helper"`
+	SkipPollOnStart bool              `yaml:"skip_poll_on_start"`
 }
 
 type StoryHelperConfig struct {
@@ -128,6 +129,7 @@ func upgradeConfig(helper up.Helper) {
 	helper.Copy(up.Bool, "stories", "enabled")
 	helper.Copy(up.Bool, "stories", "default_enabled")
 	helper.Copy(up.Str|up.Int, "stories", "poll_interval")
+	helper.Copy(up.Bool, "stories", "skip_poll_on_start")
 	helper.Copy(up.Str|up.Null, "stories", "helper", "base_url")
 	helper.Copy(up.Str|up.Null, "stories", "helper", "token")
 	helper.Copy(up.Str|up.Int, "stories", "helper", "timeout")
