@@ -67,3 +67,10 @@ stories:
   default_enabled: false
   # How often to poll Instagram for new stories
   poll_interval: 30m
+  helper:
+    # Base URL of the story reply helper service. Leave empty to disable Messenger story replies.
+    base_url: ""
+    # Optional shared secret passed as X-Helper-Token.
+    token: ""
+    # HTTP timeout when calling the helper.
+    timeout: 10s

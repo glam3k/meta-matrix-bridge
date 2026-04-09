@@ -18,6 +18,7 @@ type MetaConnector struct {
 	MsgConv     *msgconv.MessageConverter
 	DeviceStore *sqlstore.Container
 	DB          *metadb.MetaDB
+	storyHelper *storyHelperClient
 }
 
 var (
@@ -37,6 +38,7 @@ func (m *MetaConnector) Init(bridge *bridgev2.Bridge) {
 	m.DB = metadb.New(bridge.ID, bridge.DB.Database, m.Bridge.Log.With().Str("db_section", "meta").Logger())
 	m.MsgConv = msgconv.New(bridge, m.DB)
 	m.MsgConv.DisableViewOnce = m.Config.DisableViewOnce
+	m.storyHelper = newStoryHelperClient(m.Config.Stories.Helper, m.Bridge.Log.With().Str("component", "story-helper").Logger())
 }
 
 func (m *MetaConnector) Start(ctx context.Context) error {

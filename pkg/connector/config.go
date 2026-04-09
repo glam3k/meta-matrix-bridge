@@ -61,7 +61,16 @@ type StoriesConfig struct {
 	Enabled        bool          `yaml:"enabled"`
 	DefaultEnabled bool          `yaml:"default_enabled"`
 	PollInterval   time.Duration `yaml:"poll_interval"`
+	Helper         StoryHelperConfig `yaml:"helper"`
 }
+
+type StoryHelperConfig struct {
+	BaseURL string        `yaml:"base_url"`
+	Token   string        `yaml:"token"`
+	Timeout time.Duration `yaml:"timeout"`
+}
+
+const defaultStoryHelperTimeout = 10 * time.Second
 
 type umConfig Config
 
@@ -90,6 +99,9 @@ func (c *Config) PostProcess() (err error) {
 	if c.Stories.PollInterval == 0 {
 		c.Stories.PollInterval = defaultStoryPollInterval
 	}
+	if c.Stories.Helper.Timeout == 0 {
+		c.Stories.Helper.Timeout = defaultStoryHelperTimeout
+	}
 	return err
 }
 
@@ -116,6 +128,9 @@ func upgradeConfig(helper up.Helper) {
 	helper.Copy(up.Bool, "stories", "enabled")
 	helper.Copy(up.Bool, "stories", "default_enabled")
 	helper.Copy(up.Str|up.Int, "stories", "poll_interval")
+	helper.Copy(up.Str|up.Null, "stories", "helper", "base_url")
+	helper.Copy(up.Str|up.Null, "stories", "helper", "token")
+	helper.Copy(up.Str|up.Int, "stories", "helper", "timeout")
 }
 
 func (m *MetaConnector) GetConfig() (string, any, up.Upgrader) {

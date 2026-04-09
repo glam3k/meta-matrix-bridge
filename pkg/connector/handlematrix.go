@@ -55,6 +55,7 @@ var (
 	ErrStoryRepliesMessengerOnly    = bridgev2.WrapErrorInStatus(errors.New("story replies are only supported on Messenger logins")).WithIsCertain(true).WithErrorAsMessage().WithSendNotice(true).WithErrorReason(event.MessageStatusUnsupported)
 	ErrStoryReplyUnsupportedContent = bridgev2.WrapErrorInStatus(errors.New("story replies currently support only text messages")).WithIsCertain(true).WithErrorAsMessage().WithSendNotice(true).WithErrorReason(event.MessageStatusUnsupported)
 	ErrStoryRepliesDisabled         = bridgev2.WrapErrorInStatus(errors.New("story replies are disabled for this story")).WithIsCertain(true).WithErrorAsMessage().WithSendNotice(true).WithErrorReason(event.MessageStatusUnsupported)
+	ErrStoryHelperUnavailable       = bridgev2.WrapErrorInStatus(errors.New("story reply helper not configured")).WithIsCertain(true).WithErrorAsMessage().WithSendNotice(true).WithErrorReason(event.MessageStatusUnsupported)
 )
 
 const ConnectWaitTimeout = 1 * time.Minute
@@ -687,6 +688,10 @@ func (m *MetaClient) tryMessengerStoryReply(ctx context.Context, msg *bridgev2.M
 	if !m.LoginMeta.Platform.IsMessenger() {
 		return nil, true, ErrStoryRepliesMessengerOnly
 	}
+	helper := m.Main.storyHelper
+	if helper == nil {
+		return nil, true, ErrStoryHelperUnavailable
+	}
 	if msg.Content.MsgType != event.MsgText && msg.Content.MsgType != event.MsgNotice && msg.Content.MsgType != event.MsgEmote {
 		return nil, true, ErrStoryReplyUnsupportedContent
 	}
@@ -706,55 +711,64 @@ func (m *MetaClient) tryMessengerStoryReply(ctx context.Context, msg *bridgev2.M
 	if authorID == "" {
 		return nil, true, fmt.Errorf("missing story author metadata for reply")
 	}
-	cli := m.Client
-	if cli == nil || cli.Facebook == nil {
-		return nil, true, fmt.Errorf("messenger story client unavailable")
-	}
-	caps, err := cli.Facebook.VerifyContactCapabilities(ctx, authorID)
-	if err != nil {
-		zerolog.Ctx(ctx).Err(err).
-			Str("author_id", authorID).
-			Msg("Failed to verify Messenger story capabilities")
-		return nil, true, err
-	}
-	if caps == 0 {
-		zerolog.Ctx(ctx).Warn().
-			Str("author_id", authorID).
-			Msg("Messenger story reply disabled due to missing capabilities")
-		return nil, true, ErrStoryRepliesDisabled
-	}
-	otid := getOTID(msg.InputTransactionID)
-	actorID := string(m.UserLogin.ID)
-	threadID := metaid.ParseFBPortalID(msg.Portal.ID)
-	threadIDStr := ""
-	if threadID != 0 {
-		threadIDStr = strconv.FormatInt(threadID, 10)
-	}
-	input := &messagix.FacebookStoryReplyInput{
-		Message:          msg.Content.Body,
-		StoryID:          story.StoryID,
-		StoryReelID:      story.ReelID,
-		ThreadID:         threadIDStr,
-		StoryReplyType:   "TEXT",
-		ActorID:          actorID,
-		ClientMutationID: strconv.FormatInt(otid, 10),
-	}
-	if input.Message == "" && msg.Content.MsgType == event.MsgText {
+	if msg.Content.MsgType == event.MsgText && msg.Content.Body == "" {
 		return nil, true, ErrStoryReplyUnsupportedContent
 	}
-	if _, err := cli.Facebook.SendStoryReply(ctx, input); err != nil {
+	cli := m.Client
+	if cli == nil || cli.GetCookies() == nil {
+		return nil, true, fmt.Errorf("messenger story client unavailable")
+	}
+	cookieMap := cli.GetCookies().GetAll()
+	if len(cookieMap) == 0 {
+		return nil, true, fmt.Errorf("messenger story cookies unavailable")
+	}
+	helperCookies := make([]storyHelperCookie, 0, len(cookieMap))
+	for name, val := range cookieMap {
+		if val == "" {
+			continue
+		}
+		helperCookies = append(helperCookies, storyHelperCookie{
+			Name:   string(name),
+			Value:  val,
+			Domain: ".facebook.com",
+			Path:   "/",
+			Secure: true,
+		})
+	}
+	if len(helperCookies) == 0 {
+		return nil, true, fmt.Errorf("messenger story cookies unavailable")
+	}
+	req := &storyHelperRequest{
+		StoryURL: buildMessengerStoryURL(authorID, story.StoryID),
+		Message:  msg.Content.Body,
+		Cookies:  helperCookies,
+	}
+	if msg.Event != nil {
+		req.TraceID = string(msg.Event.ID)
+	}
+	if req.StoryURL == "" {
+		return nil, true, fmt.Errorf("missing story URL for reply")
+	}
+	if _, err := helper.SendReply(ctx, req); err != nil {
 		zerolog.Ctx(ctx).Error().
 			Str("story_id", story.StoryID).
 			Str("author_id", authorID).
 			Err(err).
-			Msg("Failed to send Messenger story reply")
-		return nil, true, err
+			Msg("Story reply helper failed")
+		return nil, true, bridgev2.WrapErrorInStatus(fmt.Errorf("story reply helper failed: %w", err)).WithSendNotice(true)
 	}
 	zerolog.Ctx(ctx).Info().
 		Str("story_id", story.StoryID).
 		Str("author_id", authorID).
-		Msg("Sent Messenger story reply")
+		Msg("Sent Messenger story reply via helper")
 	return nil, true, nil
+}
+
+func buildMessengerStoryURL(authorID, storyID string) string {
+	if authorID == "" || storyID == "" {
+		return ""
+	}
+	return fmt.Sprintf("https://www.facebook.com/stories/%s/%s/", authorID, storyID)
 }
 
 func (m *MetaClient) tryInstagramStoryReply(ctx context.Context, msg *bridgev2.MatrixMessage) (*bridgev2.MatrixMessageResponse, bool, error) {
