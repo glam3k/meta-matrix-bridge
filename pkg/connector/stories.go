@@ -29,7 +29,10 @@ import (
 
 var storySettingsEventType = event.Type{Type: "fi.mau.meta.story_settings", Class: event.StateEventType}
 
-const storyMetadataKey = "fi.mau.meta.story"
+const (
+	storyMetadataKey        = "fi.mau.meta.story"
+	storyMetadataExpiredKey = "expired"
+)
 
 var storyBodyTemplate = "📖 Story from %s"
 
@@ -852,10 +855,14 @@ func (evt *InstagramStoryEvent) ConvertMessage(ctx context.Context, portal *brid
 		authorID = evt.storyItem.User.Pk
 	}
 	metadata := map[string]any{
-		"source_platform": types.Instagram.String(),
-		"source_story_id": evt.storyItem.Pk,
-		"posted_at":       postedAt,
-		"expires_at":      expiresAt,
+		"source_platform":       types.Instagram.String(),
+		"source_story_id":       evt.storyItem.Pk,
+		"posted_at":             postedAt,
+		"expires_at":            expiresAt,
+		storyMetadataExpiredKey: false,
+	}
+	if evt.username != "" {
+		metadata["owner_name"] = evt.username
 	}
 	if authorID != "" {
 		metadata["source_author_id"] = authorID
@@ -878,6 +885,9 @@ func (evt *InstagramStoryEvent) ConvertMessage(ctx context.Context, portal *brid
 		ExpiresAt:          expiresAt,
 		CanReply:           ptr.Ptr(evt.storyItem.CanReply),
 		DisabledReplyTypes: evt.disabledReplyTypes,
+		Body:               part.Content.Body,
+		OwnerName:          evt.username,
+		Expired:            false,
 	}
 	if evt.storyURL != "" {
 		part.Extra["external_url"] = evt.storyURL
@@ -892,6 +902,13 @@ func (evt *InstagramStoryEvent) GetTimestamp() time.Time {
 
 func (evt *InstagramStoryEvent) GetStreamOrder() int64 {
 	return evt.timestamp.UnixMilli()
+}
+
+func (evt *InstagramStoryEvent) PostHandle(ctx context.Context, portal *bridgev2.Portal) {
+	if evt.mc == nil || evt.mc.Main == nil {
+		return
+	}
+	evt.mc.Main.trackStoryExpiry(ctx, portal, evt.messageID)
 }
 
 type MessengerStoryEvent struct {
@@ -959,10 +976,14 @@ func (evt *MessengerStoryEvent) ConvertMessage(ctx context.Context, portal *brid
 		}
 	}
 	metadata := map[string]any{
-		"source_platform": types.Messenger.String(),
-		"source_story_id": evt.storyItem.ID,
-		"posted_at":       postedAt,
-		"expires_at":      expiresAt,
+		"source_platform":       types.Messenger.String(),
+		"source_story_id":       evt.storyItem.ID,
+		"posted_at":             postedAt,
+		"expires_at":            expiresAt,
+		storyMetadataExpiredKey: false,
+	}
+	if evt.ownerName != "" {
+		metadata["owner_name"] = evt.ownerName
 	}
 	if evt.storyItem.StoryCardInfo.StoryPlayDuration > 0 {
 		metadata["duration_ms"] = int(evt.storyItem.StoryCardInfo.StoryPlayDuration * 1000)
@@ -981,6 +1002,9 @@ func (evt *MessengerStoryEvent) ConvertMessage(ctx context.Context, portal *brid
 		PostedAt:  postedAt,
 		ExpiresAt: expiresAt,
 		CanReply:  ptr.Ptr(evt.storyItem.StoryCardInfo.CanViewerTextReply),
+		Body:      part.Content.Body,
+		OwnerName: evt.ownerName,
+		Expired:   false,
 	}
 	if evt.storyURL != "" {
 		part.Extra["external_url"] = evt.storyURL
@@ -994,6 +1018,13 @@ func (evt *MessengerStoryEvent) GetTimestamp() time.Time {
 
 func (evt *MessengerStoryEvent) GetStreamOrder() int64 {
 	return evt.timestamp.UnixMilli()
+}
+
+func (evt *MessengerStoryEvent) PostHandle(ctx context.Context, portal *bridgev2.Portal) {
+	if evt.mc == nil || evt.mc.Main == nil {
+		return
+	}
+	evt.mc.Main.trackStoryExpiry(ctx, portal, evt.messageID)
 }
 
 type MessengerStoryPoller struct {

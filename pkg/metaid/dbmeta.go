@@ -31,6 +31,9 @@ type StoryMetadata struct {
 	ExpiresAt          int64    `json:"expires_at,omitempty"`
 	CanReply           *bool    `json:"can_reply,omitempty"`
 	DisabledReplyTypes []string `json:"disabled_reply_types,omitempty"`
+	Body               string   `json:"body,omitempty"`
+	OwnerName          string   `json:"owner_name,omitempty"`
+	Expired            bool     `json:"expired,omitempty"`
 }
 
 type GhostMetadata struct {

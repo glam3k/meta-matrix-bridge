@@ -19,6 +19,7 @@ type MetaConnector struct {
 	DeviceStore *sqlstore.Container
 	DB          *metadb.MetaDB
 	storyHelper *storyHelperClient
+	storyExpiry *StoryExpiryManager
 }
 
 var (
@@ -39,6 +40,7 @@ func (m *MetaConnector) Init(bridge *bridgev2.Bridge) {
 	m.MsgConv = msgconv.New(bridge, m.DB)
 	m.MsgConv.DisableViewOnce = m.Config.DisableViewOnce
 	m.storyHelper = newStoryHelperClient(m.Config.Stories.Helper, m.Bridge.Log.With().Str("component", "story-helper").Logger())
+	m.storyExpiry = NewStoryExpiryManager(m)
 }
 
 func (m *MetaConnector) Start(ctx context.Context) error {
@@ -51,7 +53,16 @@ func (m *MetaConnector) Start(ctx context.Context) error {
 	if err != nil {
 		return bridgev2.DBUpgradeError{Err: err, Section: "meta"}
 	}
+	if m.storyExpiry != nil {
+		m.storyExpiry.Start(ctx)
+	}
 	return nil
+}
+
+func (m *MetaConnector) Stop() {
+	if m.storyExpiry != nil {
+		m.storyExpiry.Stop()
+	}
 }
 
 func (m *MetaConnector) SetMaxFileSize(maxSize int64) {

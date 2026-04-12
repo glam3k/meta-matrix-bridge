@@ -63,6 +63,7 @@ type StoriesConfig struct {
 	PollInterval    time.Duration     `yaml:"poll_interval"`
 	Helper          StoryHelperConfig `yaml:"helper"`
 	SkipPollOnStart bool              `yaml:"skip_poll_on_start"`
+	ExpiryMarker    StoryExpiryConfig `yaml:"expiry_marker"`
 }
 
 type StoryHelperConfig struct {
@@ -72,6 +73,17 @@ type StoryHelperConfig struct {
 }
 
 const defaultStoryHelperTimeout = 10 * time.Second
+
+type StoryExpiryConfig struct {
+	Enabled      bool          `yaml:"enabled"`
+	PollInterval time.Duration `yaml:"poll_interval"`
+	CleanupDelay time.Duration `yaml:"cleanup_delay"`
+}
+
+const (
+	defaultStoryExpiryPollInterval = 5 * time.Minute
+	defaultStoryExpiryCleanupDelay = 48 * time.Hour
+)
 
 type umConfig Config
 
@@ -103,6 +115,12 @@ func (c *Config) PostProcess() (err error) {
 	if c.Stories.Helper.Timeout == 0 {
 		c.Stories.Helper.Timeout = defaultStoryHelperTimeout
 	}
+	if c.Stories.ExpiryMarker.PollInterval == 0 {
+		c.Stories.ExpiryMarker.PollInterval = defaultStoryExpiryPollInterval
+	}
+	if c.Stories.ExpiryMarker.CleanupDelay == 0 {
+		c.Stories.ExpiryMarker.CleanupDelay = defaultStoryExpiryCleanupDelay
+	}
 	return err
 }
 
@@ -133,6 +151,9 @@ func upgradeConfig(helper up.Helper) {
 	helper.Copy(up.Str|up.Null, "stories", "helper", "base_url")
 	helper.Copy(up.Str|up.Null, "stories", "helper", "token")
 	helper.Copy(up.Str|up.Int, "stories", "helper", "timeout")
+	helper.Copy(up.Bool, "stories", "expiry_marker", "enabled")
+	helper.Copy(up.Str|up.Int, "stories", "expiry_marker", "poll_interval")
+	helper.Copy(up.Str|up.Int, "stories", "expiry_marker", "cleanup_delay")
 }
 
 func (m *MetaConnector) GetConfig() (string, any, up.Upgrader) {
