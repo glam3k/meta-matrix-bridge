@@ -19,10 +19,17 @@ package msgconv
 import (
 	"context"
 	"fmt"
+	"io"
+	"net/http"
 	"strconv"
+	"strings"
 
+	"github.com/rs/zerolog"
+	"go.mau.fi/util/exmime"
 	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/bridgev2/networkid"
+	"maunium.net/go/mautrix/event"
+	"maunium.net/go/mautrix/id"
 
 	"go.mau.fi/mautrix-meta/pkg/messagix/data/responses"
 	"go.mau.fi/mautrix-meta/pkg/messagix/table"
@@ -79,6 +86,23 @@ func (mc *MessageConverter) InstagramStoryItemToMatrix(
 	converted, err := mc.reuploadAttachment(ctx, attachmentType, url, fileName, mime, 0, width, height, duration, refresh)
 	if err != nil {
 		return nil, err
+	}
+	if attachmentType == table.AttachmentTypeVideo {
+		thumbURL, thumbWidth, thumbHeight := pickLargestImage(item.ImageVersions2.Candidates)
+		if thumbURL != "" {
+			thumbName := fmt.Sprintf("story_%s_thumb", item.Pk)
+			thumbMXC, thumbFile, thumbInfo, err := mc.uploadStoryThumbnail(ctx, thumbURL, thumbName, thumbWidth, thumbHeight)
+			if err != nil {
+				zerolog.Ctx(ctx).
+					Err(err).
+					Str("story_id", item.Pk).
+					Msg("Failed to upload Instagram story thumbnail")
+			} else if converted.Content != nil && converted.Content.Info != nil {
+				converted.Content.Info.ThumbnailURL = thumbMXC
+				converted.Content.Info.ThumbnailFile = thumbFile
+				converted.Content.Info.ThumbnailInfo = thumbInfo
+			}
+		}
 	}
 	return converted, nil
 }
@@ -190,5 +214,86 @@ func (mc *MessageConverter) MessengerStoryItemToMatrix(
 	if err != nil {
 		return nil, err
 	}
+	if attachmentType == table.AttachmentTypeVideo {
+		var (
+			thumbURL                string
+			thumbWidth, thumbHeight int
+		)
+		if media.PreviewImage != nil && media.PreviewImage.URI != "" {
+			thumbURL = media.PreviewImage.URI
+			thumbWidth = media.PreviewImage.Width
+			thumbHeight = media.PreviewImage.Height
+		} else if media.Image != nil && media.Image.URI != "" {
+			thumbURL = media.Image.URI
+			thumbWidth = media.Image.Width
+			thumbHeight = media.Image.Height
+		} else if thumb := item.StoryCardInfo.StoryThumbnail; thumb.URI != "" {
+			thumbURL = thumb.URI
+			thumbWidth = thumb.Width
+			thumbHeight = thumb.Height
+		}
+		if thumbURL != "" {
+			thumbName := fmt.Sprintf("story_%s_thumb", item.ID)
+			thumbMXC, thumbFile, thumbInfo, err := mc.uploadStoryThumbnail(ctx, thumbURL, thumbName, thumbWidth, thumbHeight)
+			if err != nil {
+				zerolog.Ctx(ctx).
+					Err(err).
+					Str("story_id", item.ID).
+					Msg("Failed to upload Messenger story thumbnail")
+			} else if converted.Content != nil && converted.Content.Info != nil {
+				converted.Content.Info.ThumbnailURL = thumbMXC
+				converted.Content.Info.ThumbnailFile = thumbFile
+				converted.Content.Info.ThumbnailInfo = thumbInfo
+			}
+		}
+	}
 	return converted, nil
+}
+
+func (mc *MessageConverter) uploadStoryThumbnail(
+	ctx context.Context,
+	url, baseName string,
+	width, height int,
+) (id.ContentURIString, *event.EncryptedFileInfo, *event.FileInfo, error) {
+	if url == "" {
+		return "", nil, nil, fmt.Errorf("thumbnail URL missing")
+	}
+	portal, _ := ctx.Value(contextKeyPortal).(*bridgev2.Portal)
+	intent, _ := ctx.Value(contextKeyIntent).(bridgev2.MatrixAPI)
+	if portal == nil || intent == nil {
+		return "", nil, nil, fmt.Errorf("story context missing")
+	}
+	_, reader, err := DownloadMedia(ctx, "image/*", url, mc.MaxFileSize)
+	if err != nil {
+		return "", nil, nil, err
+	}
+	defer reader.Close()
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		return "", nil, nil, err
+	} else if len(data) == 0 {
+		return "", nil, nil, fmt.Errorf("thumbnail download empty")
+	}
+	mimeType := http.DetectContentType(data)
+	if !strings.HasPrefix(mimeType, "image/") {
+		mimeType = "image/jpeg"
+	}
+	fileName := baseName
+	if fileName == "" {
+		fileName = "story_thumbnail"
+	}
+	if !strings.ContainsRune(fileName, '.') {
+		fileName += exmime.ExtensionFromMimetype(mimeType)
+	}
+	mxc, file, err := intent.UploadMedia(ctx, portal.MXID, data, fileName, mimeType)
+	if err != nil {
+		return "", nil, nil, fmt.Errorf("%w: %w", bridgev2.ErrMediaReuploadFailed, err)
+	}
+	info := &event.FileInfo{
+		MimeType: mimeType,
+		Size:     len(data),
+		Width:    width,
+		Height:   height,
+	}
+	return mxc, file, info, nil
 }
