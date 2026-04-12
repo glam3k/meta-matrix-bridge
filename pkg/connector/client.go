@@ -172,8 +172,21 @@ func (m *MetaClient) ensureStoryPollers() {
 	m.storyPollers = manager
 }
 
-func (m *MetaClient) startStoryPollers(ctx context.Context) {
+func (m *MetaClient) shouldRunStoryPollers() bool {
+	if m == nil || m.Main == nil {
+		return false
+	}
 	if !m.Main.Config.Stories.Enabled {
+		return false
+	}
+	if m.LoginMeta != nil && m.LoginMeta.StoriesGlobalOverride != nil {
+		return *m.LoginMeta.StoriesGlobalOverride
+	}
+	return true
+}
+
+func (m *MetaClient) startStoryPollers(ctx context.Context) {
+	if !m.shouldRunStoryPollers() {
 		return
 	}
 	m.ensureStoryPollers()

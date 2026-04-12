@@ -44,6 +44,8 @@ type UserLoginMetadata struct {
 	PushKeys   *PushKeys        `json:"push_keys,omitempty"`
 	LoginUA    string           `json:"login_ua,omitempty"`
 
+	StoriesGlobalOverride *bool `json:"stories_global_override,omitempty"`
+
 	// Thread backfill state
 	BackfillCompleted bool `json:"backfill_completed,omitempty"`
 }

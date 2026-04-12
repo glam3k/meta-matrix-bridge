@@ -734,6 +734,56 @@ func (m *MetaConnector) setStorySetting(ctx context.Context, portal *bridgev2.Po
 	return err
 }
 
+func (m *MetaConnector) pickStorySettingsGhost(ctx context.Context, portal *bridgev2.Portal) id.UserID {
+	if portal == nil {
+		return ""
+	}
+	if portal.RoomType == database.RoomTypeDM && portal.OtherUserID != "" {
+		ghost, err := m.Bridge.GetGhostByID(ctx, portal.OtherUserID)
+		if err == nil && ghost != nil && ghost.Intent != nil {
+			return ghost.Intent.GetMXID()
+		}
+	}
+	settings, err := m.getStorySettingsContent(ctx, portal, "")
+	if err == nil && settings != nil && settings.GhostID != "" {
+		return id.UserID(settings.GhostID)
+	}
+	return ""
+}
+
+func (m *MetaConnector) resetStorySettingsForLogin(ctx context.Context, login *bridgev2.UserLogin, enabled bool) (int, error) {
+	if login == nil || login.Bridge == nil || login.Bridge.DB == nil {
+		return 0, fmt.Errorf("login data unavailable for story reset")
+	}
+	portals, err := login.Bridge.DB.UserPortal.GetAllForLogin(ctx, login.UserLogin)
+	if err != nil {
+		return 0, err
+	}
+	updated := 0
+	for _, userPortal := range portals {
+		portal, err := m.Bridge.GetPortalByKey(ctx, userPortal.Portal)
+		if err != nil {
+			zerolog.Ctx(ctx).Err(err).
+				Stringer("portal_key", userPortal.Portal).
+				Msg("Failed to load portal for story reset")
+			continue
+		}
+		if portal == nil || portal.MXID == "" {
+			continue
+		}
+		ghostMXID := m.pickStorySettingsGhost(ctx, portal)
+		var anyPlatform types.Platform
+		if err := m.setStorySetting(ctx, portal, ghostMXID, anyPlatform, true, enabled); err != nil {
+			zerolog.Ctx(ctx).Err(err).
+				Str("room_id", string(portal.MXID)).
+				Msg("Failed to reset story settings for room")
+			continue
+		}
+		updated++
+	}
+	return updated, nil
+}
+
 type InstagramStoryEvent struct {
 	mc                 *MetaClient
 	portalKey          networkid.PortalKey
